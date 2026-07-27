@@ -48,6 +48,12 @@ class CosyVoicePlugin(Star):
         self.config = dict(self.context.get_config() or {})
         self.engine.config = self.config
         self.engine.update_voices(self.config.get("voices", {}))
+        logger.info(
+            f"[cosyvoice] 初始化配置 keys={list(self.config.keys())} "
+            f"base_url={self.config.get('base_url')} "
+            f"voices_type={type(self.config.get('voices')).__name__} "
+            f"voices={repr(self.config.get('voices'))[:200]}"
+        )
 
     # ---------- 事件标记辅助 ----------
     def _key(self, event: AstrMessageEvent):
