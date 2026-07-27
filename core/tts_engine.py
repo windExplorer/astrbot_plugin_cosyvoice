@@ -80,6 +80,14 @@ class TtsEngine:
                     "prompt_text": item.get("prompt_text", "") or "",
                 }
         self.voices = d
+        # 诊断：读到了配置却解析为 0 个，多半是子项 name(音色名) 为空
+        if not d and voices:
+            logger.warning(
+                f"[cosyvoice] 已读到 voices 配置({type(voices).__name__})但解析出 0 个音色，"
+                f"请检查每项是否填写了「音色名」。原始内容(前500字): {repr(voices)[:500]}"
+            )
+        elif d:
+            logger.info(f"[cosyvoice] 已加载 {len(d)} 个音色: {list(d.keys())}")
 
     def list_voices(self) -> list:
         return sorted(self.voices.keys())
@@ -136,7 +144,10 @@ class TtsEngine:
         """合成文本并返回 wav 文件路径；无可用音色或失败返回 None。"""
         name, prompt_wav, prompt_text = self.resolve_voice(voice_name)
         if name is None:
-            logger.warning("[cosyvoice] 未配置任何可用音色，跳过语音合成")
+            logger.warning(
+                f"[cosyvoice] 未配置任何可用音色，跳过语音合成。"
+                f"运行实例读到的 raw voices={repr(self.config.get('voices'))[:300]}"
+            )
             return None
 
         chunks = self.split_text(text)
