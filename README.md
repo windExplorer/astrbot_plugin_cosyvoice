@@ -10,7 +10,7 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 - 多音色：`prompt_wav` 参考音频映射，按需切换（`/tts_voice <音色名>`）。
 - 多种触发方式：
   1. **会话级持久开关**（推荐按群使用）：`/tts_on` 在当前群开启「一直语音」，`/tts_off` 关闭；状态按群持久保存（重启不丢），其他群不受影响。
-  2. **自然语言开关**：对话中说「以后用语音交流」「别用语音了」，模型自动调用 `set_voice_mode` 工具开关当前群语音（由 `skill.md` 引导语义，不靠写死关键词）。
+  2. **自然语言开关**：对话中说「以后用语音交流」「别用语音了」，模型自动调用 `set_voice_mode` 工具开关当前群语音（由插件内置 Skill `skills/cosyvoice_voice_mode/SKILL.md` 引导语义，不靠写死关键词）。
   3. **自动**：`auto_tts=true` 时对符合条件的回复自动合成语音（全局生效）。
   4. **关键词**：用户消息含触发词（默认「念出来 / 读出来」）。
   5. **LLM 工具 / 指令**：大模型可调用 `text_to_speech` 念指定文本；用户可发 `/tts <文本>`。
@@ -31,7 +31,7 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 | `tts_scope` | `llm_only` | `llm_only` / `all_text` |
 | `enable_llm_tool` | `true` | 注册 `text_to_speech` 工具 |
 | `enable_user_trigger` | `true` | 启用关键词触发 |
-| `trigger_keywords` | `["念出来","读出来"]` | 触发关键词（已去除过于宽泛的「语音」，改由 skill.md 语义触发接管「用语音」场景） |
+| `trigger_keywords` | `["念出来","读出来"]` | 触发关键词（已去除过于宽泛的「语音」，改由内置 SKILL.md 语义触发接管「用语音」场景） |
 | `blocklist` / `allowlist` | `[]` | 会话/用户白黑名单 |
 | `max_text_len` | `200` | 长文本切分长度 |
 
@@ -81,7 +81,7 @@ python3 pack.py
 ```
 astrbot_plugin_cosyvoice/
 ├── main.py            # Star 入口：钩子 + 指令 + 工具
-├── skill.md           # 注入 LLM 系统提示，引导语义触发语音工具
+├── skills/cosyvoice_voice_mode/SKILL.md  # 内置 Skill：引导 LLM 语义触发语音工具（大写文件名+子目录，符合 AstrBot 规范）
 ├── metadata.yaml
 ├── _conf_schema.json
 ├── PLAN.md

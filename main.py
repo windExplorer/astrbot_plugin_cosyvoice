@@ -277,7 +277,9 @@ class CosyVoicePlugin(Star):
     # ---------- LLM 函数调用工具 ----------
     @filter.llm_tool(name="text_to_speech")
     async def text_to_speech_tool(self, event: AstrMessageEvent, text: str, voice: str = ""):
-        """将指定文本转换为语音并朗读出来。当用户希望机器人用语音回复、或需要把某段内容念出来时使用。
+        """将指定文本转换为语音并朗读出来（临时念一次，不开启长期语音模式）。
+        仅在用户明确给出要朗读的具体文本（如「把这段话念出来 / 朗读以下内容」）时使用。
+        注意：若用户想「长期用语音交流」，请调用 set_voice_mode，不要调本工具。
 
         Args:
             text(string): 需要朗读的文本内容
@@ -310,9 +312,10 @@ class CosyVoicePlugin(Star):
     # ---------- LLM 工具：自然语言开关当前会话语音模式 ----------
     @filter.llm_tool(name="set_voice_mode")
     async def set_voice_mode_tool(self, event: AstrMessageEvent, on: bool, reason: str = ""):
-        """开启或关闭「当前会话」的自动语音模式（按群记忆，重启不丢）。
-        当用户表达『用语音回复 / 以后都用语音交流 / 念出来 / 语音跟我说话』时调用 on=true；
+        """开启或关闭「当前会话」的长期自动语音模式（按群记忆，重启不丢）。这是用户想「长期用语音交流」时唯一应调用的工具。
+        当用户表达『以后都用语音交流 / 一直用语音 / 用语音跟我说话』时调用 on=true；
         当用户表达『不用语音 / 用文字回复 / 别念了 / 关掉语音』时调用 on=false。
+        注意：本工具只切换开关、不朗读内容；开启后模型正常用文字回复即可，插件会自动合成语音。
 
         Args:
             on(bool): true=开启当前会话自动语音；false=关闭
