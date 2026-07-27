@@ -291,5 +291,26 @@ class CosyVoicePlugin(Star):
             yield event.chain_result([Comp.Record(file=path, url=path)])
         audio.schedule_cleanup(path)
 
+    # ---------- LLM 工具：自然语言开关当前会话语音模式 ----------
+    @filter.llm_tool(name="set_voice_mode")
+    async def set_voice_mode_tool(self, event: AstrMessageEvent, on: bool, reason: str = ""):
+        """开启或关闭「当前会话」的自动语音模式（按群记忆，重启不丢）。
+        当用户表达『用语音回复 / 以后都用语音交流 / 念出来 / 语音跟我说话』时调用 on=true；
+        当用户表达『不用语音 / 用文字回复 / 别念了 / 关掉语音』时调用 on=false。
+
+        Args:
+            on(bool): true=开启当前会话自动语音；false=关闭
+            reason(string): 可选，简要说明
+        """
+        self._refresh_cfg()
+        origin = event.unified_msg_origin
+        if on:
+            self._sessions[origin] = True
+        else:
+            self._sessions.pop(origin, None)
+        self._save_sessions()
+        state = "已开启" if on else "已关闭"
+        return f"当前会话自动语音模式{state}。"
+
     async def terminate(self):
         self._flags.clear()
