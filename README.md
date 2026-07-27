@@ -8,10 +8,12 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 
 - 接入官方 QwenAudio/CosyVoice 的 FastAPI 推理服务（默认端口 50000），模型 `FunAudioLLM/Fun-CosyVoice3-0.5B-2512`。
 - 多音色：`prompt_wav` 参考音频映射，按需切换（`/tts_voice <音色名>`）。
-- 三种触发方式：
-  1. **自动**：`auto_tts=true` 时对符合条件的回复自动合成语音。
-  2. **关键词**：用户消息含触发词（默认「语音 / 念出来 / 读出来」）。
-  3. **LLM 工具 / 指令**：大模型可调用 `text_to_speech`；用户可发 `/tts <文本>`。
+- 多种触发方式：
+  1. **会话级持久开关**（推荐按群使用）：`/tts_on` 在当前群开启「一直语音」，`/tts_off` 关闭；状态按群持久保存（重启不丢），其他群不受影响。
+  2. **自然语言开关**：对话中说「以后用语音交流」「别用语音了」，模型自动调用 `set_voice_mode` 工具开关当前群语音（由 `skill.md` 引导语义，不靠写死关键词）。
+  3. **自动**：`auto_tts=true` 时对符合条件的回复自动合成语音（全局生效）。
+  4. **关键词**：用户消息含触发词（默认「念出来 / 读出来」）。
+  5. **LLM 工具 / 指令**：大模型可调用 `text_to_speech` 念指定文本；用户可发 `/tts <文本>`。
 - 文本绝不丢失：`both` 模式下原文与语音一同发送，且 LLM 文本由 AstrBot 单独存入会话历史，记忆插件与大模型下一轮都能拿到文字。
 
 ## 配置（`_conf_schema.json`）
@@ -29,7 +31,7 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 | `tts_scope` | `llm_only` | `llm_only` / `all_text` |
 | `enable_llm_tool` | `true` | 注册 `text_to_speech` 工具 |
 | `enable_user_trigger` | `true` | 启用关键词触发 |
-| `trigger_keywords` | `["语音","念出来","读出来"]` | 触发关键词 |
+| `trigger_keywords` | `["念出来","读出来"]` | 触发关键词（已去除过于宽泛的「语音」，改由 skill.md 语义触发接管「用语音」场景） |
 | `blocklist` / `allowlist` | `[]` | 会话/用户白黑名单 |
 | `max_text_len` | `200` | 长文本切分长度 |
 
@@ -48,10 +50,12 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 1. 部署 CosyVoice3 推理服务并监听 `base_url`（默认 50000）。
 2. 准备参考音频 `wav` 与对应文本，填入 `voices`，并设置 `default_voice`。
 3. 触发示例：
+   - 发送 `/tts_on` → 当前群开启「一直语音」（持久，重启不丢）；`/tts_off` 关闭。
+   - 对话中说「以后都用语音跟我交流」→ 模型自动调用 `set_voice_mode` 开启当前群语音；说「别用语音了」则关闭。
    - 对话中说「把这段话**念出来**」→ 关键词触发语音。
-   - 发送 `/tts 你好呀` → 直接朗读。
+   - 发送 `/tts 你好呀` → 直接朗读某段文本。
    - 发送 `/tts_voice 小明` → 切换默认音色。
-   - 让大模型自己决定：「用语音告诉我今天天气」→ 大模型调用 `text_to_speech`。
+   - 让大模型自己决定：「把这段念出来」→ 大模型调用 `text_to_speech`。
 
 ## 打包与上传到 AstrBot
 
@@ -77,6 +81,7 @@ python3 pack.py
 ```
 astrbot_plugin_cosyvoice/
 ├── main.py            # Star 入口：钩子 + 指令 + 工具
+├── skill.md           # 注入 LLM 系统提示，引导语义触发语音工具
 ├── metadata.yaml
 ├── _conf_schema.json
 ├── PLAN.md
