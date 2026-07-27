@@ -11,7 +11,9 @@
 AstrBot 单独存入会话历史，因此记忆插件与大模型下一轮都能拿到文字。
 """
 
+import os
 import re
+import json
 
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
@@ -46,6 +48,11 @@ class CosyVoicePlugin(Star):
         self.engine = TtsEngine(self.config, self.client)
         # 每个消息的事件标记（避免并发串台），以 message_id 为键
         self._flags: dict = {}
+        # 会话级语音开关（按群持久记忆）：unified_msg_origin -> True
+        self._session_file = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "data", "tts_sessions.json"
+        )
+        self._sessions = self._load_sessions()
 
     async def initialize(self):
         cfg = self._refresh_cfg()
@@ -67,6 +74,22 @@ class CosyVoicePlugin(Star):
 
     def _clear(self, event: AstrMessageEvent):
         self._flags.pop(self._key(event), None)
+
+    # ---------- 会话级语音开关（按群持久记忆） ----------
+    def _load_sessions(self) -> dict:
+        try:
+            with open(self._session_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_sessions(self):
+        os.makedirs(os.path.dirname(self._session_file), exist_ok=True)
+        with open(self._session_file, "w", encoding="utf-8") as f:
+            json.dump(self._sessions, f, ensure_ascii=False, indent=2)
+
+    def _session_enabled(self, event: AstrMessageEvent) -> bool:
+        return bool(self._sessions.get(event.unified_msg_origin, False))
 
     # ---------- 工具方法 ----------
     def _refresh_cfg(self) -> dict:
@@ -98,10 +121,11 @@ class CosyVoicePlugin(Star):
         is_llm = self._get_flag(event, "is_llm", False)
         want = self._get_flag(event, "want", False)
         auto = bool(cfg.get("auto_tts", False))
+        session_on = self._session_enabled(event)
         if cfg.get("tts_scope", "llm_only") == "llm_only":
-            return bool(is_llm and (auto or want))
-        # all_text：自动开启则全部；否则仅关键词/工具触发
-        return bool(auto or want)
+            return bool(is_llm and (auto or want or session_on))
+        # all_text：自动开启则全部；否则仅关键词/工具触发或本会话已开
+        return bool(auto or want or session_on)
 
     # ---------- LLM 回复钩子：标记 + 关键词触发 ----------
     @filter.on_llm_response()
@@ -212,6 +236,27 @@ class CosyVoicePlugin(Star):
         self.config["default_voice"] = name
         self.engine.config = self.config
         yield event.plain_result(f"好嘞，已切到「{name}」这个嗓音～ 不过重启后会还原，想长久用记得把设置存一下。")
+
+    # ---------- 会话级开关：/tts_on 当前群一直语音，/tts_off 关闭 ----------
+    @filter.command("tts_on")
+    async def tts_on_cmd(self, event: AstrMessageEvent):
+        self._refresh_cfg()
+        origin = event.unified_msg_origin
+        self._sessions[origin] = True
+        self._save_sessions()
+        yield event.plain_result(
+            "收到～ 从这个群开始，我每句回复都给你念出来啦（想静音就发 /tts_off）。"
+        )
+
+    @filter.command("tts_off")
+    async def tts_off_cmd(self, event: AstrMessageEvent):
+        self._refresh_cfg()
+        origin = event.unified_msg_origin
+        if self._sessions.pop(origin, None) is not None:
+            self._save_sessions()
+            yield event.plain_result("好嘞，这个群我不自动念了，有需要随时 /tts_on 喊我。")
+        else:
+            yield event.plain_result("这个群本来就没开着自动语音呀～")
 
     # ---------- LLM 函数调用工具 ----------
     @filter.llm_tool(name="text_to_speech")
