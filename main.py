@@ -177,7 +177,8 @@ class CosyVoicePlugin(Star):
     async def tts_cmd(self, event: AstrMessageEvent):
         self._refresh_cfg()
         raw = (event.message_str or "").strip()
-        text = re.sub(r"^/tts\b", "", raw, flags=re.IGNORECASE).strip()
+        # 去掉 /tts 命令前缀：兼容 AstrBot 是否已自动剥离命令词，以及带空格/@提及等情况
+        text = re.sub(r"^[/\s@]*tts\b\s*", "", raw, flags=re.IGNORECASE).strip()
         if not text:
             yield event.plain_result("试试这样：/tts 后面跟上你想让我念的话～")
             return
@@ -199,7 +200,8 @@ class CosyVoicePlugin(Star):
     async def tts_voice_cmd(self, event: AstrMessageEvent):
         self._refresh_cfg()
         raw = (event.message_str or "").strip()
-        name = re.sub(r"^/tts_voice\b", "", raw, flags=re.IGNORECASE).strip()
+        # 去掉 /tts_voice 命令前缀（同上，兼容已剥离/未剥离与 @提及）
+        name = re.sub(r"^[/\s@]*tts_voice\b\s*", "", raw, flags=re.IGNORECASE).strip()
         voices = self.engine.list_voices()
         if not voices:
             yield event.plain_result("我还没拿到能用的嗓音，暂时开不了口～ 先给我安排一个音色吧。")
