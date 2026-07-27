@@ -32,9 +32,12 @@ PLUGIN_ID = "astrbot_plugin_cosyvoice"
 
 @register(PLUGIN_ID, "Yours", "接入本地 CosyVoice3，让机器人以可配置音色朗读回复", "1.0.0")
 class CosyVoicePlugin(Star):
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
-        self.config = dict(self.context.get_config() or {})
+        # AstrBot 在实例化插件时通过 __init__ 注入完整配置（含 template_list 类型）。
+        # 部分版本也保留 context.get_config()，这里做兼容：优先用注入配置，回退到 get_config()。
+        self._injected_config = config if config is not None else (self.context.get_config() or {})
+        self.config = self._injected_config
         self.client = CosyVoiceClient(
             base_url=self.config.get("base_url", "http://127.0.0.1:50000"),
             sample_rate=int(self.config.get("sample_rate", 24000)),
@@ -45,14 +48,11 @@ class CosyVoicePlugin(Star):
         self._flags: dict = {}
 
     async def initialize(self):
-        self.config = dict(self.context.get_config() or {})
-        self.engine.config = self.config
-        self.engine.update_voices(self.config.get("voices", {}))
+        cfg = self._refresh_cfg()
         logger.info(
-            f"[cosyvoice] 初始化配置 keys={list(self.config.keys())} "
-            f"base_url={self.config.get('base_url')} "
-            f"voices_type={type(self.config.get('voices')).__name__} "
-            f"voices={repr(self.config.get('voices'))[:200]}"
+            f"[cosyvoice] 初始化配置 keys={list(cfg.keys())} "
+            f"voices_type={type(cfg.get('voices')).__name__} "
+            f"voices_count={len(cfg.get('voices') or [])}"
         )
 
     # ---------- 事件标记辅助 ----------
@@ -70,11 +70,15 @@ class CosyVoicePlugin(Star):
 
     # ---------- 工具方法 ----------
     def _refresh_cfg(self) -> dict:
-        cfg = self.context.get_config() or {}
-        self.config = cfg
-        self.engine.config = cfg
-        self.engine.update_voices(cfg.get("voices", {}))
-        return cfg
+        live = self.context.get_config() or {}
+        # 以注入的完整配置为基线，再用 get_config() 的实时值覆盖。
+        # 这样即使 get_config() 不返回 template_list/默认值字段，也不会丢失已配置的音色。
+        merged = dict(self._injected_config)
+        merged.update({k: v for k, v in live.items() if v is not None})
+        self.config = merged
+        self.engine.config = merged
+        self.engine.update_voices(merged.get("voices") or {})
+        return merged
 
     def _in_scope(self, event: AstrMessageEvent, cfg: dict) -> bool:
         """根据 blocklist/allowlist 判断该会话是否允许转语音。"""
