@@ -1,0 +1,146 @@
+{
+  "base_url": {
+    "type": "string",
+    "title": "CosyVoice 服务地址",
+    "description": "推理服务根地址",
+    "hint": "例如 http://127.0.0.1:50000（最小 FastAPI，默认端口 50000）",
+    "obvious_hint": true,
+    "default": "http://127.0.0.1:50000"
+  },
+  "server_voices_dir": {
+    "type": "string",
+    "title": "服务端参考音频目录",
+    "description": "服务端参考音频目录",
+    "hint": "与服务端启动参数 --voices_dir 一致。填目录名（如 cosyvoice_voices）或绝对路径。配置后 prompt_wav 按文件名由服务端读取、不再上传（推荐大文件用）；留空则按旧逻辑从本端上传",
+    "obvious_hint": true,
+    "default": "cosyvoice_voices"
+  },
+  "sample_rate": {
+    "type": "int",
+    "title": "采样率",
+    "description": "音频采样率(Hz)",
+    "hint": "插件首次合成会向服务端自动获取并覆盖此值，一般不用改；仅当服务端未启动/获取失败时才作为兜底默认值（Fun-CosyVoice3-0.5B-2512 默认 24000）",
+    "default": 24000
+  },
+  "timeout": {
+    "type": "int",
+    "title": "请求超时（秒）",
+    "description": "单次合成超时",
+    "hint": "默认 60，长文本建议调大",
+    "default": 60
+  },
+  "default_voice": {
+    "type": "string",
+    "title": "默认音色",
+    "description": "默认音色名",
+    "hint": "必须是下方「音色列表」中已配置的一项；留空则使用列表第一个",
+    "default": ""
+  },
+  "voices": {
+    "type": "template_list",
+    "title": "音色列表",
+    "description": "音色名 + 参考音频 + 参考文本",
+    "templates": {
+      "voice": {
+        "name": "音色",
+        "hint": "添加一个参考音色",
+        "display_item": "name",
+        "items": {
+          "name": {
+            "type": "string",
+            "title": "音色名",
+            "description": "唯一标识",
+            "hint": "用于 /tts_voice 切换与 LLM 工具指定"
+          },
+          "prompt_wav": {
+            "type": "string",
+            "title": "参考音频",
+            "description": "wav 文件名或路径",
+            "hint": "走服务端时只填文件名（配合上面的服务端目录）；走本端上传时填绝对/相对路径"
+          },
+          "prompt_text": {
+            "type": "string",
+            "title": "参考文本",
+            "description": "音频对应原文（可选）",
+            "hint": "服务端模式且服务端 voices.json 已存该文件名文本时可留空，服务端自动取；仅本端上传模式才需要填"
+          }
+        }
+      }
+    },
+    "default": []
+  },
+  "send_mode": {
+    "type": "string",
+    "title": "发送模式",
+    "description": "语音发送方式",
+    "options": ["both", "voice_only"],
+    "hint": "both=文本+语音都发（推荐，保证聊天记录文字不丢）；voice_only=只发语音（文字仍写入会话上下文）",
+    "default": "both"
+  },
+  "auto_tts": {
+    "type": "bool",
+    "title": "自动语音",
+    "description": "是否自动合成",
+    "hint": "false=默认不发，仅关键词触发、/tts 或 LLM 工具时才发；true=符合条件的回复自动朗读",
+    "default": false
+  },
+  "tts_scope": {
+    "type": "string",
+    "title": "语音范围",
+    "description": "语音覆盖范围",
+    "options": ["llm_only", "all_text"],
+    "hint": "llm_only=仅转大模型回复；all_text=对所有文本结果（含指令输出）转语音",
+    "default": "llm_only"
+  },
+  "enable_llm_tool": {
+    "type": "bool",
+    "title": "启用 LLM 工具",
+    "description": "注册朗读工具",
+    "hint": "开启后大模型可主动决定朗读某段文本",
+    "default": true
+  },
+  "enable_user_trigger": {
+    "type": "bool",
+    "title": "启用关键词触发",
+    "description": "关键词触发开关",
+    "hint": "需配合下方「触发关键词」使用",
+    "default": true
+  },
+  "trigger_keywords": {
+    "type": "list",
+    "title": "触发关键词",
+    "description": "触发语音的词",
+    "items": {
+      "type": "string"
+    },
+    "hint": "用户消息含这些词即触发本条回复转语音（需 enable_user_trigger=true）。默认：语音、念出来、读出来",
+    "default": ["语音", "念出来", "读出来"]
+  },
+  "blocklist": {
+    "type": "list",
+    "title": "不转语音名单",
+    "description": "跳过语音的名单",
+    "items": {
+      "type": "string"
+    },
+    "hint": "填 unified_msg_origin 或 sender_id，命中即跳过（优先级高于 allowlist）",
+    "default": []
+  },
+  "allowlist": {
+    "type": "list",
+    "title": "仅名单内转语音",
+    "description": "仅名单内转语音",
+    "items": {
+      "type": "string"
+    },
+    "hint": "填 unified_msg_origin 或 sender_id；留空表示不限制",
+    "default": []
+  },
+  "max_text_len": {
+    "type": "int",
+    "title": "单次最长文本",
+    "description": "超出则切分",
+    "hint": "默认 200；0 表示不限制，超出此长度将切分后分别合成并拼接",
+    "default": 200
+  }
+}
