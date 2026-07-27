@@ -1,37 +1,26 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""CosyVoice TTS 推理 API（兼容 CosyVoice1/2/3，与 astrbot_plugin_cosyvoice 的 client.py 完全对齐）。
+"""CosyVoice TTS 推理 API（兼容 CosyVoice1/2/3）。
 
-返回裸 int16 PCM 字节流（无 WAV 头），插件端再用 wave 补头，避免任何平台转换依赖。
+与 astrbot_plugin_cosyvoice 的 client.py 完全对齐，返回裸 int16 PCM 字节流。
 
-为什么需要它：
-    常见的 CosyVoice3 WebUI 是 Gradio 应用（路由形如 /gradio_api/...），与插件期望的
-    /inference_zero_shot 原始接口不一致。本脚本提供一个最小 FastAPI 服务。
+运行：
+    # 本机开发
+    uv run python cosyvoice_api.py --model_dir pretrained_models/Fun-CosyVoice3-0.5B-2512
 
-运行（在 CosyVoice 环境中，确保 `import cosyvoice` 可用）：
-    # 用 uv（推荐）：脚本目录即 CosyVoice 仓库根
-    uv run python cosyvoice_api.py --model_dir pretrained_models\Fun-CosyVoice3-0.5B-2512 --port 50000
-
-    # 或直接双击 start_cosyvoice_api.bat
+    # 或双击
+    start_cosyvoice_api.bat
 
 接口：
     GET  /                             健康检查
-    GET  /voices                       列出服务端参考音频目录中的文件（便于核对）
-    POST /inference_zero_shot          表单: tts_text, prompt_text(可选),
-                                        + prompt_wav(文件, 可选) 或 prompt_wav_path(服务端本地路径, 可选)
-                                        -> 裸 int16 PCM（24kHz, 单声道）
-    POST /inference_instruct2          表单: tts_text, instruct_text,
-                                        + prompt_wav(文件, 可选) 或 prompt_wav_path(服务端本地路径, 可选)
-                                        -> 裸 int16 PCM（CosyVoice2/3 额外支持，按需使用）
+    GET  /voices                       列出参考音频目录中的文件
+    POST /inference_zero_shot          表单: tts_text, prompt_text, prompt_wav(文件)/prompt_wav_path(路径)
+                                        -> 裸 int16 PCM
+    POST /inference_instruct2          表单: tts_text, instruct_text, prompt_wav(文件)/prompt_wav_path(路径)
+                                        -> 裸 int16 PCM（CosyVoice2/3）
 
-参考音频与文本放在哪？
-    推荐把参考音频 wav 放到 CosyVoice 服务端本机的 --voices_dir 目录，并同目录放置
-    voices.json 记录「文件名 -> 参考文本」映射，例如：
-        { "xiaoyu.wav": "你好，我是小宇，很高兴为你服务。" }
-    插件只需通过 prompt_wav_path 传「文件名」，服务端直接读本地 wav 并从 voices.json 取文本，
-    避免每次请求都把大文件从 AstrBot 端上传一遍，也无需在插件配置里重复写文本。
-    prompt_text 字段可选：传了则以它为准（覆盖），不传则自动用 voices.json 里的文本。
-    voices_dir 仅允许其内部文件与绝对路径，避免任意路径遍历。
+参考音频推荐放到 --voices_dir 目录，并同目录放 voices.json：
+    { "xiaoyu.wav": "你好，我是小宇，很高兴为你服务。" }
+插件传 prompt_wav_path=文件名 即可，不用每次上传大文件。
 """
 
 import argparse
@@ -41,16 +30,7 @@ import sys
 import tempfile
 from typing import Optional
 
-# 统一用 UTF-8 输出，避免 Windows 控制台中文乱码（print / 报错信息）
-try:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
-except Exception:  # noqa: BLE001
-    pass
-
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-# CosyVoice 依赖 third_party/Matcha-TTS，把它加入搜索路径，确保从脚本目录能 import cosyvoice
 sys.path.insert(0, os.path.join(ROOT_DIR, "third_party", "Matcha-TTS"))
 
 import numpy as np
@@ -58,12 +38,7 @@ import uvicorn
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import Response
 
-# 兼容 CosyVoice1/2/3：新版本入口为 AutoModel，旧版本为 CosyVoice
-try:
-    from cosyvoice.cli.cosyvoice import AutoModel as _CosyVoiceModel
-except ImportError:  # 旧版 CosyVoice
-    from cosyvoice.cli.cosyvoice import CosyVoice as _CosyVoiceModel
-
+from cosyvoice.cli.cosyvoice import AutoModel
 from cosyvoice.utils.file_utils import load_wav, logging
 
 app = FastAPI(title="CosyVoice TTS API")
@@ -76,9 +51,8 @@ VOICES_JSON = os.path.join(VOICES_DIR, "voices.json")
 
 def _load_model(model_dir: str):
     global cosyvoice, SAMPLE_RATE
-    cosyvoice = _CosyVoiceModel(model_dir)
-    # 采样率以模型实际配置为准（CosyVoice3 通常为 24000）
-    SAMPLE_RATE = getattr(cosyvoice, "sample_rate", SAMPLE_RATE)
+    cosyvoice = AutoModel(model_dir=model_dir)
+    SAMPLE_RATE = cosyvoice.sample_rate
     methods = [
         m
         for m in (
@@ -239,7 +213,7 @@ def main():
     parser.add_argument(
         "--model_dir",
         default=os.path.join(ROOT_DIR, "pretrained_models", "Fun-CosyVoice3-0.5B-2512"),
-        help="模型目录或 ModelScope/HuggingFace 仓库名（默认相对脚本目录）",
+        help="模型目录或 ModelScope/HuggingFace 仓库名",
     )
     parser.add_argument(
         "--voices_dir",
