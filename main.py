@@ -258,6 +258,22 @@ class CosyVoicePlugin(Star):
         else:
             yield event.plain_result("这个群本来就没开着自动语音呀～")
 
+    # ---------- 诊断：查看当前群语音开关状态 ----------
+    @filter.command("tts_status")
+    async def tts_status_cmd(self, event: AstrMessageEvent):
+        self._refresh_cfg()
+        origin = event.unified_msg_origin
+        on = self._session_enabled(event)
+        exists = os.path.exists(self._session_file)
+        lines = [
+            f"当前群标识：{origin}",
+            f"自动语音开关：{'已开启 🔊' if on else '未开启 🔇'}",
+            f"记录文件：{self._session_file}",
+            f"文件是否存在：{'是' if exists else '否（说明从没成功保存过开关）'}",
+            f"已开启的群数量：{len(self._sessions)}",
+        ]
+        yield event.plain_result("\n".join(lines))
+
     # ---------- LLM 函数调用工具 ----------
     @filter.llm_tool(name="text_to_speech")
     async def text_to_speech_tool(self, event: AstrMessageEvent, text: str, voice: str = ""):
