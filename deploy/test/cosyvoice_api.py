@@ -39,7 +39,7 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import Response
 
 from cosyvoice.cli.cosyvoice import AutoModel
-from cosyvoice.utils.file_utils import load_wav, logging
+from cosyvoice.utils.file_utils import logging
 
 app = FastAPI(title="CosyVoice TTS API")
 
@@ -82,15 +82,13 @@ def _synthesize(generator):
     return np.concatenate(chunks).tobytes()
 
 
-def _load_prompt_wav(upload: UploadFile) -> "object":
+def _save_upload_wav(upload: UploadFile) -> str:
+    """保存上传的 wav 到临时文件，返回路径（不调用 load_wav，模型内部会自己加载）。"""
     suffix = os.path.splitext(upload.filename or "prompt.wav")[1] or ".wav"
     fd, path = tempfile.mkstemp(suffix=suffix)
     with os.fdopen(fd, "wb") as f:
         f.write(upload.file.read())
-    try:
-        return load_wav(path, 16000)
-    finally:
-        os.remove(path)
+    return path
 
 
 def _load_voices_map() -> dict:
@@ -107,19 +105,21 @@ def _load_voices_map() -> dict:
     return {}
 
 
-def _resolve_prompt_speech(upload: Optional[UploadFile], server_path: str):
-    """解析参考音频：优先用服务端本地路径（无需上传），否则用上传文件。"""
+def _resolve_prompt_wav_path(upload: Optional[UploadFile], server_path: str) -> str:
+    """解析参考音频路径（返回文件路径字符串，不是 tensor）。
+
+    inference_zero_shot / inference_instruct2 内部会自己调 load_wav，
+    如果预加载成 tensor 再传入会报错: TypeError: Invalid file: tensor(...)
+    """
     if server_path:
         if os.path.isabs(server_path) and os.path.exists(server_path):
-            path = server_path
-        else:
-            cand = os.path.join(VOICES_DIR, server_path)
-            if not os.path.exists(cand):
-                raise FileNotFoundError(f"服务端参考音频不存在: {server_path}（在 {VOICES_DIR} 中未找到）")
-            path = cand
-        return load_wav(path, 16000)
+            return server_path
+        cand = os.path.join(VOICES_DIR, server_path)
+        if not os.path.exists(cand):
+            raise FileNotFoundError(f"服务端参考音频不存在: {server_path}（在 {VOICES_DIR} 中未找到）")
+        return cand
     if upload is not None and upload.filename:
-        return _load_prompt_wav(upload)
+        return _save_upload_wav(upload)
     raise ValueError("需提供 prompt_wav 文件上传或 prompt_wav_path 服务端路径")
 
 
@@ -164,19 +164,19 @@ async def inference_zero_shot(
     if cosyvoice is None:
         return Response("model not loaded", status_code=503)
     try:
-        prompt_speech = _resolve_prompt_speech(prompt_wav, prompt_wav_path)
+        prompt_wav_path = _resolve_prompt_wav_path(prompt_wav, prompt_wav_path)
         prompt_text = _resolve_prompt_text(prompt_text, prompt_wav_path)
         if not prompt_text:
             logging.warning(
                 f"[zero_shot] 缺少参考文本: prompt_text为空且voices.json未配置, "
-                f"prompt_wav_path={prompt_wav_path or '(上传)'}"
+                f"prompt_wav_path={prompt_wav_path}"
             )
             return Response("缺少参考文本：请在请求中传 prompt_text，或在 voices.json 配置该文件的文本", status_code=400)
     except (FileNotFoundError, ValueError) as e:
         logging.warning(f"[zero_shot] 音频解析失败: {e}")
         return Response(str(e), status_code=400)
     logging.info(f"[zero_shot] tts_text={tts_text[:40]}..., prompt_text={prompt_text[:40]}...")
-    gen = cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech, stream=False)
+    gen = cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_wav_path, stream=False)
     pcm = _synthesize(gen)
     if not pcm:
         return Response("empty audio", status_code=500)
@@ -196,12 +196,12 @@ async def inference_instruct2(
     if not hasattr(cosyvoice, "inference_instruct2"):
         return Response("model does not support instruct2", status_code=400)
     try:
-        prompt_speech = _resolve_prompt_speech(prompt_wav, prompt_wav_path)
+        prompt_wav_path = _resolve_prompt_wav_path(prompt_wav, prompt_wav_path)
     except (FileNotFoundError, ValueError) as e:
         logging.warning(f"[instruct2] 音频解析失败: {e}")
         return Response(str(e), status_code=400)
     logging.info(f"[instruct2] tts_text={tts_text[:40]}..., instruct_text={instruct_text[:40]}...")
-    gen = cosyvoice.inference_instruct2(tts_text, instruct_text, prompt_speech, stream=False)
+    gen = cosyvoice.inference_instruct2(tts_text, instruct_text, prompt_wav_path, stream=False)
     pcm = _synthesize(gen)
     if not pcm:
         return Response("empty audio", status_code=500)

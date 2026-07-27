@@ -179,13 +179,13 @@ class CosyVoicePlugin(Star):
         raw = (event.message_str or "").strip()
         text = re.sub(r"^/tts\b", "", raw, flags=re.IGNORECASE).strip()
         if not text:
-            yield event.plain_result("用法：/tts <要朗读的文本>")
+            yield event.plain_result("试试这样：/tts 后面跟上你想让我念的话～")
             return
 
         self._set_flag(event, "suppress", True)
         path = await self.engine.synthesize(text)
         if not path:
-            yield event.plain_result("语音合成失败了，请稍后再试，或检查语音服务配置。")
+            yield event.plain_result("哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？")
             return
 
         if self.config.get("send_mode", "both") == "both":
@@ -202,14 +202,14 @@ class CosyVoicePlugin(Star):
         name = re.sub(r"^/tts_voice\b", "", raw, flags=re.IGNORECASE).strip()
         voices = self.engine.list_voices()
         if not voices:
-            yield event.plain_result("尚未配置可用音色，请先在插件设置里添加音色。")
+            yield event.plain_result("我还没拿到能用的嗓音，暂时开不了口～ 先给我安排一个音色吧。")
             return
         if not name or name not in voices:
-            yield event.plain_result(f"可用音色：{', '.join(voices)}")
+            yield event.plain_result(f"我现在会这些嗓音：{', '.join(voices)}（用 /tts_voice 名字 就能换）")
             return
         self.config["default_voice"] = name
         self.engine.config = self.config
-        yield event.plain_result(f"已切换默认音色为：{name}（重启插件后失效，建议改配置文件）")
+        yield event.plain_result(f"好嘞，已切到「{name}」这个嗓音～ 不过重启后会还原，想长久用记得把设置存一下。")
 
     # ---------- LLM 函数调用工具 ----------
     @filter.llm_tool(name="text_to_speech")
@@ -222,7 +222,7 @@ class CosyVoicePlugin(Star):
         """
         self._refresh_cfg()
         if not self.config.get("enable_llm_tool", True):
-            yield event.plain_result("语音工具当前未启用。")
+            yield event.plain_result("语音功能还没开呢，先把它打开我就能念啦～")
             return
 
         self._set_flag(event, "suppress", True)
@@ -230,12 +230,12 @@ class CosyVoicePlugin(Star):
             self._set_flag(event, "voice", voice)
 
         if not text or not text.strip():
-            yield event.plain_result("未提供需要朗读的文本。")
+            yield event.plain_result("你想让我念点啥呀？把文字发给我就行～")
             return
 
         path = await self.engine.synthesize(text.strip(), voice or None)
         if not path:
-            yield event.plain_result("语音合成失败了，请稍后再试。")
+            yield event.plain_result("话到嘴边卡壳了，这次没念出来，待会儿再试试？")
             return
 
         if self.config.get("send_mode", "both") == "both":
