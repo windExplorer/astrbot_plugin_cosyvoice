@@ -245,7 +245,7 @@ class CosyVoicePlugin(Star):
         self._sessions[origin] = True
         self._save_sessions()
         yield event.plain_result(
-            "收到～ 从这个群开始，我每句回复都给你念出来啦（想静音就发 /tts_off）。"
+            "收到～ 从这个聊天开始，我每句回复都给你念出来啦（想静音就发 /tts_off）。"
         )
 
     @filter.command("tts_off")
@@ -254,9 +254,9 @@ class CosyVoicePlugin(Star):
         origin = event.unified_msg_origin
         if self._sessions.pop(origin, None) is not None:
             self._save_sessions()
-            yield event.plain_result("好嘞，这个群我不自动念了，有需要随时 /tts_on 喊我。")
+            yield event.plain_result("好嘞，这个聊天我不自动念了，有需要随时 /tts_on 喊我。")
         else:
-            yield event.plain_result("这个群本来就没开着自动语音呀～")
+            yield event.plain_result("这个聊天本来就没开着自动语音呀～")
 
     # ---------- 诊断：查看当前群语音开关状态 ----------
     @filter.command("tts_status")
@@ -266,11 +266,11 @@ class CosyVoicePlugin(Star):
         on = self._session_enabled(event)
         exists = os.path.exists(self._session_file)
         lines = [
-            f"当前群标识：{origin}",
+            f"当前会话标识：{origin}",
             f"自动语音开关：{'已开启 🔊' if on else '未开启 🔇'}",
             f"记录文件：{self._session_file}",
             f"文件是否存在：{'是' if exists else '否（说明从没成功保存过开关）'}",
-            f"已开启的群数量：{len(self._sessions)}",
+            f"已开启的会话数量：{len(self._sessions)}",
         ]
         yield event.plain_result("\n".join(lines))
 
@@ -312,9 +312,9 @@ class CosyVoicePlugin(Star):
     # ---------- LLM 工具：自然语言开关当前会话语音模式 ----------
     @filter.llm_tool(name="set_voice_mode")
     async def set_voice_mode_tool(self, event: AstrMessageEvent, on: bool, reason: str = ""):
-        """开启或关闭「当前会话」的长期自动语音模式（按群记忆，重启不丢）。这是用户想「长期用语音交流」时唯一应调用的工具。
-        当用户表达『以后都用语音交流 / 一直用语音 / 用语音跟我说话』时调用 on=true；
-        当用户表达『不用语音 / 用文字回复 / 别念了 / 关掉语音』时调用 on=false。
+        """开启或关闭「当前会话（群聊或私聊均可）」的长期自动语音模式，按会话独立记忆、重启不丢。这是用户想「长期用语音交流」时唯一应调用的工具。
+        当用户表达『从此以后我都会发语音消息 / 以后都用语音回复 / 一直用语音跟我说话』时调用 on=true；
+        当用户表达『以后不用发语音了 / 用文字回复就行 / 别念了 / 关掉语音』时调用 on=false。
         注意：本工具只切换开关、不朗读内容；开启后模型正常用文字回复即可，插件会自动合成语音。
 
         Args:
@@ -328,8 +328,9 @@ class CosyVoicePlugin(Star):
         else:
             self._sessions.pop(origin, None)
         self._save_sessions()
-        state = "已开启" if on else "已关闭"
-        return f"当前会话自动语音模式{state}。"
+        if on:
+            return "好嘞，从这个聊天开始我都会发语音消息啦～"
+        return "没问题，这个聊天我以后就用文字回复啦～"
 
     async def terminate(self):
         self._flags.clear()
