@@ -181,7 +181,7 @@ class CosyVoicePlugin(Star):
         self._set_flag(event, "suppress", True)
         path = await self.engine.synthesize(text)
         if not path:
-            yield event.plain_result("语音合成失败，请检查 CosyVoice 服务是否启动、音色是否配置正确。")
+            yield event.plain_result("语音合成失败了，请稍后再试，或检查语音服务配置。")
             return
 
         if self.config.get("send_mode", "both") == "both":
@@ -198,7 +198,7 @@ class CosyVoicePlugin(Star):
         name = re.sub(r"^/tts_voice\b", "", raw, flags=re.IGNORECASE).strip()
         voices = self.engine.list_voices()
         if not voices:
-            yield event.plain_result("尚未配置任何音色，请在插件配置中填写 voices。")
+            yield event.plain_result("尚未配置可用音色，请先在插件设置里添加音色。")
             return
         if not name or name not in voices:
             yield event.plain_result(f"可用音色：{', '.join(voices)}")
@@ -231,7 +231,7 @@ class CosyVoicePlugin(Star):
 
         path = await self.engine.synthesize(text.strip(), voice or None)
         if not path:
-            yield event.plain_result("语音合成失败，请检查 CosyVoice 服务或音色配置。")
+            yield event.plain_result("语音合成失败了，请稍后再试。")
             return
 
         if self.config.get("send_mode", "both") == "both":
