@@ -113,8 +113,8 @@
     "items": {
       "type": "string"
     },
-    "hint": "用户消息含这些词即触发本条回复转语音（需 enable_user_trigger=true）。默认：语音、念出来、读出来",
-    "default": ["语音", "念出来", "读出来"]
+    "hint": "用户消息含这些词即触发本条回复转语音（需 enable_user_trigger=true）。默认：念出来、读出来",
+    "default": ["念出来", "读出来"]
   },
   "blocklist": {
     "type": "list",
