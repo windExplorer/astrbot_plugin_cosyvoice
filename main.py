@@ -310,22 +310,17 @@ class CosyVoicePlugin(Star):
         else:
             yield event.plain_result("这个聊天本来就没开着自动语音呀～")
 
-    # ---------- 诊断：查看当前群语音开关状态 ----------
+    # ---------- 查看当前聊天语音开关状态（不暴露敏感信息） ----------
     @filter.command("tts_status")
     async def tts_status_cmd(self, event: AstrMessageEvent):
         self._refresh_cfg()
-        origin = event.unified_msg_origin
         on = self._session_enabled(event)
-        exists = os.path.exists(self._session_file)
         session_voice = self._session_voice(event)
         default_voice = self.config.get("default_voice") or ""
         lines = [
-            f"当前会话标识：{origin}",
             f"自动语音开关：{'已开启 🔊' if on else '未开启 🔇'}",
-            f"当前会话音色：{session_voice or '（未单独设置）'}；全局默认：{default_voice or '（未配置）'}",
-            f"记录文件：{self._session_file}",
-            f"文件是否存在：{'是' if exists else '否（说明从没成功保存过开关）'}",
-            f"已开启的会话数量：{len(self._sessions)}",
+            f"当前聊天音色：{session_voice or '（未单独设置）'}",
+            f"全局默认音色：{default_voice or '（未配置）'}",
         ]
         yield event.plain_result("\n".join(lines))
 
