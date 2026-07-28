@@ -44,6 +44,7 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 | `enable_llm_tool` | `true` | 注册 `text_to_speech` 工具 |
 | `enable_user_trigger` | `true` | 启用关键词触发 |
 | `trigger_keywords` | `["念出来","读出来"]` | 触发关键词（已去除过于宽泛的「语音」，改由内置 SKILL.md 语义触发接管「用语音」场景） |
+| `text_keywords` | `["用文字","发文字","文字回复","别用语音","这段别念","不用语音念"]` | 纯文字请求关键词：即使已开语音，用户说这些词时**本条只发文字、不合成语音**（不改变 tts_on 开关）。需 `enable_user_trigger=true` |
 | `blocklist` / `allowlist` | `[]` | 会话/用户白黑名单 |
 | `max_text_len` | `200` | 长文本切分长度 |
 

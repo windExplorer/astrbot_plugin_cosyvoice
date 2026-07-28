@@ -190,6 +190,12 @@ class CosyVoicePlugin(Star):
         if cfg.get("auto_tts", False):
             self._set_flag(event, "want", True)
 
+        # 用户明确要求「用文字回复」：本条覆盖语音模式，只发文字（不改变 tts_on 开关）
+        if cfg.get("enable_user_trigger", True):
+            text_kw = cfg.get("text_keywords", []) or []
+            if any(kw and kw in msg for kw in text_kw):
+                self._set_flag(event, "suppress", True)
+
     # ---------- 装饰结果钩子：追加语音到结果链 ----------
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):

@@ -116,6 +116,16 @@
     "hint": "用户消息含这些词即触发本条回复转语音（需 enable_user_trigger=true）。默认：念出来、读出来",
     "default": ["念出来", "读出来"]
   },
+  "text_keywords": {
+    "type": "list",
+    "title": "纯文字请求关键词",
+    "description": "要求用文字回复的词",
+    "items": {
+      "type": "string"
+    },
+    "hint": "即使已开启 tts_on/自动语音，用户消息含这些词时，本条回复只发文字、不合成语音（不改变语音开关状态）。需 enable_user_trigger=true。默认：用文字、发文字、文字回复、别用语音、这段别念、不用语音念",
+    "default": ["用文字", "发文字", "文字回复", "别用语音", "这段别念", "不用语音念"]
+  },
   "blocklist": {
     "type": "list",
     "title": "不转语音名单",
