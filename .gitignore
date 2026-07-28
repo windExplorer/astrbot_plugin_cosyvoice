@@ -205,3 +205,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# 插件运行时持久数据（按会话记忆的开关/音色，含本机信息，不入库）
+data/

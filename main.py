@@ -53,6 +53,11 @@ class CosyVoicePlugin(Star):
             os.path.dirname(os.path.abspath(__file__)), "data", "tts_sessions.json"
         )
         self._sessions = self._load_sessions()
+        # 会话级音色（按群/私聊持久记忆）：unified_msg_origin -> 音色名
+        self._voice_file = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "data", "tts_voices.json"
+        )
+        self._voices = self._load_voices()
 
     async def initialize(self):
         cfg = self._refresh_cfg()
@@ -90,6 +95,21 @@ class CosyVoicePlugin(Star):
 
     def _session_enabled(self, event: AstrMessageEvent) -> bool:
         return bool(self._sessions.get(event.unified_msg_origin, False))
+
+    def _load_voices(self) -> dict:
+        try:
+            with open(self._voice_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_voices(self):
+        os.makedirs(os.path.dirname(self._voice_file), exist_ok=True)
+        with open(self._voice_file, "w", encoding="utf-8") as f:
+            json.dump(self._voices, f, ensure_ascii=False, indent=2)
+
+    def _session_voice(self, event: AstrMessageEvent) -> str | None:
+        return self._voices.get(event.unified_msg_origin)
 
     # ---------- 工具方法 ----------
     def _refresh_cfg(self) -> dict:
@@ -179,7 +199,7 @@ class CosyVoicePlugin(Star):
         if any(isinstance(c, Comp.Record) for c in chain):
             return
 
-        voice = self._get_flag(event, "voice", None)
+        voice = self._get_flag(event, "voice", None) or self._session_voice(event)
         path = await self.engine.synthesize(full_text, voice)
         self._clear(event)
         if not path:
@@ -208,7 +228,7 @@ class CosyVoicePlugin(Star):
             return
 
         self._set_flag(event, "suppress", True)
-        path = await self.engine.synthesize(text)
+        path = await self.engine.synthesize(text, self._session_voice(event))
         if not path:
             yield event.plain_result("哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？")
             return
@@ -231,11 +251,19 @@ class CosyVoicePlugin(Star):
             yield event.plain_result("我还没拿到能用的嗓音，暂时开不了口～ 先给我安排一个音色吧。")
             return
         if not name or name not in voices:
-            yield event.plain_result(f"我现在会这些嗓音：{', '.join(voices)}（用 /tts_voice 名字 就能换）")
+            cur = self._session_voice(event)
+            cur_hint = f"（当前聊天用的是「{cur}」）" if cur else ""
+            yield event.plain_result(
+                f"我现在会这些嗓音：{', '.join(voices)}（用 /tts_voice 名字 就能换）{cur_hint}"
+            )
             return
-        self.config["default_voice"] = name
-        self.engine.config = self.config
-        yield event.plain_result(f"好嘞，已切到「{name}」这个嗓音～ 不过重启后会还原，想长久用记得把设置存一下。")
+        # 按当前会话持久记录音色，不影响其他聊天
+        origin = event.unified_msg_origin
+        self._voices[origin] = name
+        self._save_voices()
+        yield event.plain_result(
+            f"好嘞，这个聊天以后都用「{name}」这个嗓音啦～（仅当前聊天生效，其他聊天不受影响）"
+        )
 
     # ---------- 会话级开关：/tts_on 当前群一直语音，/tts_off 关闭 ----------
     @filter.command("tts_on")
@@ -265,9 +293,12 @@ class CosyVoicePlugin(Star):
         origin = event.unified_msg_origin
         on = self._session_enabled(event)
         exists = os.path.exists(self._session_file)
+        session_voice = self._session_voice(event)
+        default_voice = self.config.get("default_voice") or ""
         lines = [
             f"当前会话标识：{origin}",
             f"自动语音开关：{'已开启 🔊' if on else '未开启 🔇'}",
+            f"当前会话音色：{session_voice or '（未单独设置）'}；全局默认：{default_voice or '（未配置）'}",
             f"记录文件：{self._session_file}",
             f"文件是否存在：{'是' if exists else '否（说明从没成功保存过开关）'}",
             f"已开启的会话数量：{len(self._sessions)}",
@@ -298,7 +329,8 @@ class CosyVoicePlugin(Star):
             yield event.plain_result("你想让我念点啥呀？把文字发给我就行～")
             return
 
-        path = await self.engine.synthesize(text.strip(), voice or None)
+        target_voice = voice or self._session_voice(event)
+        path = await self.engine.synthesize(text.strip(), target_voice)
         if not path:
             yield event.plain_result("话到嘴边卡壳了，这次没念出来，待会儿再试试？")
             return
