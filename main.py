@@ -49,15 +49,34 @@ class CosyVoicePlugin(Star):
         # 每个消息的事件标记（避免并发串台），以 message_id 为键
         self._flags: dict = {}
         # 会话级语音开关（按群持久记忆）：unified_msg_origin -> True
-        self._session_file = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "data", "tts_sessions.json"
-        )
+        data_dir = self._data_dir()
+        self._session_file = os.path.join(data_dir, "tts_sessions.json")
         self._sessions = self._load_sessions()
         # 会话级音色（按群/私聊持久记忆）：unified_msg_origin -> 音色名
-        self._voice_file = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "data", "tts_voices.json"
-        )
+        self._voice_file = os.path.join(data_dir, "tts_voices.json")
         self._voices = self._load_voices()
+
+    def _data_dir(self) -> str:
+        """持久数据目录。
+
+        优先写到插件目录之外（AstrBot 的 <root>/data/astrbot_plugin_cosyvoice/），
+        避免「重载/重装插件」时插件目录被重新解压、把 data/ 一起清空导致记忆丢失。
+        若该位置不可写，回退到插件目录内的 data/。
+        """
+        plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        # AstrBot 标准布局：<root>/data/plugins/<plugin_name>/  -> 取 <root>/data
+        external = os.path.join(os.path.dirname(os.path.dirname(plugin_dir)), "astrbot_plugin_cosyvoice")
+        for cand in (external, os.path.join(plugin_dir, "data")):
+            try:
+                os.makedirs(cand, exist_ok=True)
+                probe = os.path.join(cand, ".writable_test")
+                with open(probe, "w", encoding="utf-8") as f:
+                    f.write("1")
+                os.remove(probe)
+                return cand
+            except Exception:
+                continue
+        return os.path.join(plugin_dir, "data")
 
     async def initialize(self):
         cfg = self._refresh_cfg()
@@ -65,6 +84,11 @@ class CosyVoicePlugin(Star):
             f"[cosyvoice] 初始化配置 keys={list(cfg.keys())} "
             f"voices_type={type(cfg.get('voices')).__name__} "
             f"voices_count={len(cfg.get('voices') or [])}"
+        )
+        logger.info(
+            f"[cosyvoice] 持久数据目录={os.path.dirname(self._session_file)} "
+            f"开关文件存在={os.path.exists(self._session_file)} "
+            f"音色文件存在={os.path.exists(self._voice_file)}"
         )
 
     # ---------- 事件标记辅助 ----------
