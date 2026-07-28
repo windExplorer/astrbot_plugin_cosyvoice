@@ -262,7 +262,7 @@ class CosyVoicePlugin(Star):
         self._voices[origin] = name
         self._save_voices()
         yield event.plain_result(
-            f"好嘞，这个聊天以后都用「{name}」这个嗓音啦～（仅当前聊天生效，其他聊天不受影响）"
+            f"好嘞，这个聊天以后都用「{name}」这个嗓音啦～"
         )
 
     # ---------- 会话级开关：/tts_on 当前群一直语音，/tts_off 关闭 ----------
@@ -363,6 +363,40 @@ class CosyVoicePlugin(Star):
         if on:
             return "好嘞，从这个聊天开始我都会发语音消息啦～"
         return "没问题，这个聊天我以后就用文字回复啦～"
+
+    # ---------- LLM 工具：切换当前会话音色（持久） ----------
+    @filter.llm_tool(name="set_voice")
+    async def set_voice_tool(self, event: AstrMessageEvent, name: str):
+        """切换「当前会话（群聊或私聊均可）」长期使用的音色，按会话独立记忆、重启不丢。当用户说「以后用 XX 的声音 / 换成 XX 音色 / 用小明的嗓音」时调用。
+        注意：本工具只切换音色、不朗读内容；切换后该聊天之后的语音都用这个新音色。
+        不确定有哪些音色时，先调用 list_voices 查看可用名称。
+
+        Args:
+            name(string): 目标音色名（必须是 list_voices 返回列表中的某个名字）
+        """
+        self._refresh_cfg()
+        if not self.config.get("enable_llm_tool", True):
+            return "语音功能还没开呢，先把它打开我就能换音色啦～"
+        voices = self.engine.list_voices()
+        if not name or name not in voices:
+            return f"没有「{name}」这个音色，可用音色有：{', '.join(voices)}"
+        self._voices[event.unified_msg_origin] = name
+        self._save_voices()
+        return f"好嘞，这个聊天以后都用「{name}」这个嗓音啦～"
+
+    # ---------- LLM 工具：列出可用音色 ----------
+    @filter.llm_tool(name="list_voices")
+    async def list_voices_tool(self, event: AstrMessageEvent):
+        """列出当前所有可用音色名称。当用户问「你有哪些声音 / 能换成什么音色 / 都有什么嗓音 / 可以念成谁的声音」时调用，方便用户挑选后配合 set_voice 切换。
+
+        Args:
+            无
+        """
+        self._refresh_cfg()
+        voices = self.engine.list_voices()
+        if not voices:
+            return "我暂时还没有可用的音色，请先配置参考音频。"
+        return "当前可用音色：" + "、".join(voices)
 
     async def terminate(self):
         self._flags.clear()
