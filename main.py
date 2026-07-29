@@ -26,10 +26,13 @@ except Exception:  # noqa: BLE001
     LLMResponse = object  # type: ignore
 
 from .core.tts_engine import TtsEngine
-from .cosyvoice.client import CosyVoiceClient
+from .cosyvoice.client import CosyVoiceClient, CosyVoiceServerError
 from .utils import audio
 
 PLUGIN_ID = "astrbot_plugin_cosyvoice"
+
+# 语音服务器连不上时统一给用户的提示（大模型也需要能看懂这是服务器故障）
+SERVER_DOWN_TIP = "🎙️ 语音服务器失联了，可以稍后再试或者联系管理员~（文字照常发送）"
 
 
 @register(PLUGIN_ID, "Yours", "接入本地 CosyVoice3，让机器人以可配置音色朗读回复", "1.0.0")
@@ -230,7 +233,13 @@ class CosyVoicePlugin(Star):
             return
 
         voice = self._get_flag(event, "voice", None) or self._session_voice(event)
-        path = await self.engine.synthesize(full_text, voice)
+        try:
+            path = await self.engine.synthesize(full_text, voice)
+        except CosyVoiceServerError:
+            self._clear(event)
+            logger.warning("[cosyvoice] 语音服务器失联，仅发送文本并追加提示")
+            chain.append(Comp.Plain(SERVER_DOWN_TIP))
+            return
         self._clear(event)
         if not path:
             logger.warning("[cosyvoice] 合成失败，仅发送文本")
@@ -258,7 +267,11 @@ class CosyVoicePlugin(Star):
             return
 
         self._set_flag(event, "suppress", True)
-        path = await self.engine.synthesize(text, self._session_voice(event))
+        try:
+            path = await self.engine.synthesize(text, self._session_voice(event))
+        except CosyVoiceServerError:
+            yield event.plain_result(SERVER_DOWN_TIP)
+            return
         if not path:
             yield event.plain_result("哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？")
             return
@@ -355,7 +368,11 @@ class CosyVoicePlugin(Star):
             return
 
         target_voice = voice or self._session_voice(event)
-        path = await self.engine.synthesize(text.strip(), target_voice)
+        try:
+            path = await self.engine.synthesize(text.strip(), target_voice)
+        except CosyVoiceServerError:
+            yield event.plain_result(SERVER_DOWN_TIP)
+            return
         if not path:
             yield event.plain_result("话到嘴边卡壳了，这次没念出来，待会儿再试试？")
             return

@@ -15,6 +15,14 @@ from astrbot.api import logger
 from ..utils import audio
 
 
+class CosyVoiceServerError(Exception):
+    """语音服务器不可达（连接失败 / 超时）。
+
+    与「服务器在线但推理报错」区分：用于触发专门的失联提示，
+    而非笼统的「合成失败」。
+    """
+
+
 class CosyVoiceClient:
     def __init__(
         self,
@@ -93,7 +101,7 @@ class CosyVoiceClient:
             raise
         except httpx.RequestError as e:
             logger.error(f"[cosyvoice] 无法连接 CosyVoice 服务 {url}: {e}")
-            raise
+            raise CosyVoiceServerError(f"无法连接语音服务器 {url}: {e}") from e
         finally:
             if files:
                 files["prompt_wav"][1].close()

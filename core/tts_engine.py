@@ -5,7 +5,7 @@ import re
 
 from astrbot.api import logger
 
-from ..cosyvoice.client import CosyVoiceClient
+from ..cosyvoice.client import CosyVoiceClient, CosyVoiceServerError
 from ..utils import audio
 
 # 插件根目录（core/ 的上一级），用于解析相对参考音频路径
@@ -166,6 +166,9 @@ class TtsEngine:
                 return None
             combined = b"".join(pcms)
             return audio.pcm_to_wav_file(combined, self.client.sample_rate, self.client.cache_dir)
+        except CosyVoiceServerError:
+            # 服务器失联是「环境故障」而非「内容问题」，向上抛给调用方给出专门提示
+            raise
         except Exception as e:  # noqa: BLE001
             logger.error(f"[cosyvoice] 语音合成失败: {e}")
             return None
