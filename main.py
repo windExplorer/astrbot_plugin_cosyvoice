@@ -51,6 +51,8 @@ class CosyVoicePlugin(Star):
         self.engine = TtsEngine(self.config, self.client)
         # 每个消息的事件标记（避免并发串台），以 message_id 为键
         self._flags: dict = {}
+        # 语音服务器失联状态：True 时已提示过，避免每条消息重复刷屏；合成成功时复位
+        self._server_down = False
         # 会话级语音开关（按群持久记忆）：unified_msg_origin -> True
         data_dir = self._data_dir()
         self._session_file = os.path.join(data_dir, "tts_sessions.json")
@@ -237,13 +239,17 @@ class CosyVoicePlugin(Star):
             path = await self.engine.synthesize(full_text, voice)
         except CosyVoiceServerError:
             self._clear(event)
-            logger.warning("[cosyvoice] 语音服务器失联，仅发送文本并追加提示")
-            chain.append(Comp.Plain(SERVER_DOWN_TIP))
+            logger.warning("[cosyvoice] 语音服务器失联，仅发送文本")
+            # 同一聊天内只提示一次，合成成功（服务器恢复）后会复位，避免每条消息刷屏
+            if not self._server_down:
+                self._server_down = True
+                chain.append(Comp.Plain(SERVER_DOWN_TIP))
             return
         self._clear(event)
         if not path:
             logger.warning("[cosyvoice] 合成失败，仅发送文本")
             return
+        self._server_down = False  # 成功拿到音频，说明服务器已恢复
 
         record = Comp.Record(file=path, url=path)
         audio.schedule_cleanup(path)
