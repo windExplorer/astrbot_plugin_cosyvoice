@@ -25,7 +25,7 @@ try:  # 仅用于类型标注，缺失也不影响运行
 except Exception:  # noqa: BLE001
     LLMResponse = object  # type: ignore
 
-from .core.tts_engine import TtsEngine
+from .core.tts_engine import TtsEngine, is_speakable
 from .cosyvoice.client import CosyVoiceClient, CosyVoiceServerError
 from .utils import audio
 
@@ -51,6 +51,8 @@ class CosyVoicePlugin(Star):
         self.engine = TtsEngine(self.config, self.client)
         # 每个消息的事件标记（避免并发串台），以 message_id 为键
         self._flags: dict = {}
+        # 本轮模型生成的原文（按会话），用于「结果链文本无效」时回退合成
+        self._last_llm: dict = {}
         # 语音服务器失联状态：True 时已提示过，避免每条消息重复刷屏；合成成功时复位
         self._server_down = False
         # 会话级语音开关（按群持久记忆）：unified_msg_origin -> True
@@ -182,6 +184,13 @@ class CosyVoicePlugin(Star):
         self._refresh_cfg()
         self._set_flag(event, "is_llm", True)
 
+        # 记住本轮模型原文，供结果链文本缺失/异常（如混入 [] 占位符）时回退合成
+        resp_text = getattr(resp, "completion_text", None) or getattr(resp, "text", "") or ""
+        if isinstance(resp_text, list):
+            resp_text = "".join(str(x) for x in resp_text)
+        if resp_text:
+            self._last_llm[event.unified_msg_origin] = resp_text
+
         cfg = self.config
 
         # 关键词触发
@@ -227,8 +236,14 @@ class CosyVoicePlugin(Star):
             if isinstance(c, Comp.Plain) and getattr(c, "text", "")
         ]
         full_text = "".join(texts).strip()
-        if not full_text:
-            return
+        if not is_speakable(full_text):
+            # 结果链文本无效（空 / [] 占位符等）：回退用本轮模型原文合成
+            fb = self._last_llm.get(event.unified_msg_origin, "")
+            if is_speakable(fb):
+                logger.debug("[cosyvoice] 结果链文本无效，回退使用本轮模型原文合成语音")
+                full_text = fb
+            else:
+                return
 
         # 已含语音则不重复
         if any(isinstance(c, Comp.Record) for c in chain):
@@ -401,9 +416,14 @@ class CosyVoicePlugin(Star):
         if voice:
             self._set_flag(event, "voice", voice)
 
-        if not text or not text.strip():
-            yield event.plain_result("你想让我念点啥呀？把文字发给我就行～")
-            return
+        if not is_speakable(text):
+            # 模型可能没把正文放进 text 参数（如传入 [] 占位符），回退用本轮模型原文
+            fb = self._last_llm.get(event.unified_msg_origin, "")
+            if is_speakable(fb):
+                text = fb
+            else:
+                yield event.plain_result("你想让我念点啥呀？把文字发给我就行～")
+                return
 
         target_voice = voice or self._session_voice(event)
         try:

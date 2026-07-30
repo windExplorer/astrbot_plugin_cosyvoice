@@ -15,6 +15,26 @@ _PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VOICES_DIR = os.path.join(_PLUGIN_ROOT, "voices")
 
 
+def is_speakable(text: str) -> bool:
+    """判断文本是否值得拿去合成语音：
+
+    - 空 / 纯空白 → 否；
+    - 占位符 ``[]`` ``{}`` ``null`` ``None`` ``nil`` ``undefined`` → 否；
+    - 仅由括号 / 空白 / 引号构成（如 ``[ ]`` ``{ }``） → 否；
+    - 其余（含正常中文、标点） → 是。
+    """
+    if not text:
+        return False
+    t = text.strip()
+    if not t:
+        return False
+    if t in ("[]", "{}", "null", "None", "nil", "undefined", "null"):
+        return False
+    if re.fullmatch(r"[\s\[\]\{\}\(\)\"']*", t):
+        return False
+    return True
+
+
 class TtsEngine:
     def __init__(self, config: dict, client: CosyVoiceClient):
         self.config = config
@@ -164,9 +184,9 @@ class TtsEngine:
             )
             return None
 
-        chunks = self.split_text(text)
+        chunks = [c for c in self.split_text(text) if is_speakable(c)]
         if not chunks:
-            logger.debug("[cosyvoice] 文本为空，跳过语音合成")
+            logger.debug("[cosyvoice] 无有效可合成文本，跳过语音合成")
             return None
 
         try:
