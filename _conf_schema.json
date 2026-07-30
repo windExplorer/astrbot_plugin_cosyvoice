@@ -39,11 +39,11 @@
   "voices": {
     "type": "template_list",
     "title": "音色列表",
-    "description": "逐条编辑音色（音色名 + 参考音频 + 参考文本）。需要一次填很多条时，可用下方「批量导入音色（JSON）」文本域粘贴 JSON 一键填充。",
+    "description": "逐条编辑音色（音色名 + 参考音频 + 参考文本），点击「添加音色」即可新增一条。",
     "templates": {
       "voice": {
-        "name": "音色",
-        "hint": "添加一个参考音色",
+        "name": "添加音色",
+        "hint": "新增一条参考音色（含音色名 + 参考音频 + 参考文本）",
         "display_item": "name",
         "items": {
           "name": {
