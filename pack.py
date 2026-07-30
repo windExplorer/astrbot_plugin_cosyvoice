@@ -11,10 +11,14 @@
       （astrbot_plugin_cosyvoice/），AstrBot 解压后即可识别。
     - 自动排除：.git、__pycache__、*.pyc、.venv、node_modules、dist、
       打包脚本自身，以及 deploy/api-优化（历史优化副本）等无需上线的内容。
+    - 默认产物带版本号：dist/<插件名>_v<版本号>.zip（版本取自 metadata.yaml）。
+      若同名文件已存在则追加时间戳，不覆盖历史打包文件；可用 --output 指定路径覆盖。
 """
 
 import argparse
 import os
+import re
+import time
 import zipfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +27,28 @@ PLUGIN_NAME = os.path.basename(ROOT)
 EXCLUDE_DIRS = {".git", "__pycache__", ".venv", "node_modules", "dist"}
 EXCLUDE_FILES = {"pack.py", "pack.sh", "pack.bat"}
 EXCLUDE_SUFFIXES = (".pyc", ".pyo")
+
+
+def _read_version() -> str:
+    """从 metadata.yaml 读取 version（去掉前缀 v/V）。读取失败回退 0.0.0。"""
+    p = os.path.join(ROOT, "metadata.yaml")
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r"^\s*version\s*:\s*(\S+)", line)
+                if m:
+                    return m.group(1).strip().lstrip("vV") or "0.0.0"
+    except Exception:
+        pass
+    return "0.0.0"
+
+
+def _unique_path(path: str) -> str:
+    """若 path 已存在，追加时间戳返回新路径，避免覆盖历史文件。"""
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    return f"{stem}_{time.strftime('%Y%m%d_%H%M%S')}{ext}"
 
 
 def _should_exclude(rel_path: str) -> bool:
@@ -40,15 +66,23 @@ def main():
     parser = argparse.ArgumentParser(description="打包 AstrBot 插件为 zip")
     parser.add_argument(
         "--output",
-        default=os.path.join(ROOT, "dist", PLUGIN_NAME + ".zip"),
-        help="输出 zip 路径（默认 dist/<插件名>.zip）",
+        default=None,
+        help="输出 zip 路径（默认 dist/<插件名>_v<版本号>.zip，已存在则加时间戳避免覆盖）",
     )
     args = parser.parse_args()
 
-    out = os.path.abspath(args.output)
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    if os.path.exists(out):
-        os.remove(out)
+    if args.output:
+        # 手动指定输出：保持原行为（覆盖已存在文件）
+        out = os.path.abspath(args.output)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        if os.path.exists(out):
+            os.remove(out)
+    else:
+        # 默认：文件名带版本号，且不覆盖已打好的包（同名则追加时间戳）
+        version = _read_version()
+        base = os.path.join(ROOT, "dist", f"{PLUGIN_NAME}_v{version}.zip")
+        os.makedirs(os.path.dirname(base), exist_ok=True)
+        out = _unique_path(base)
 
     count = 0
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
