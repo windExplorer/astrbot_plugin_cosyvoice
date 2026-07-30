@@ -88,7 +88,7 @@ class CosyVoicePlugin(Star):
         logger.info(
             f"[cosyvoice] 初始化配置 keys={list(cfg.keys())} "
             f"voices_type={type(cfg.get('voices')).__name__} "
-            f"voices_count={len(cfg.get('voices') or [])}"
+            f"voices_count={len(self.engine.voices)}"
         )
         logger.info(
             f"[cosyvoice] 持久数据目录={os.path.dirname(self._session_file)} "
@@ -149,7 +149,7 @@ class CosyVoicePlugin(Star):
         merged.update({k: v for k, v in live.items() if v is not None})
         self.config = merged
         self.engine.config = merged
-        self.engine.update_voices(merged.get("voices") or {})
+        self.engine.update_voices(merged.get("voices") or {}, merged.get("voices_bulk"))
         return merged
 
     def _in_scope(self, event: AstrMessageEvent, cfg: dict) -> bool:

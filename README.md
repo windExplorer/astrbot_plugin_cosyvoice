@@ -19,7 +19,7 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 | `/tts_on` | 开启当前聊天的自动语音 | ✅ 持久 | 该聊天每句回复都念出来（重启不丢） |
 | `/tts_off` | 关闭当前聊天的自动语音 | ✅ 持久 | 关闭后恢复文字回复 |
 | `/tts_status` | 查看当前聊天状态 | — | 显示开关状态、当前会话音色、全局默认音色、记录文件 |
-| `/tts_export` | 导出当前音色配置为 JSON | — | 把已配置的所有音色导出成 JSON（代码块或文件），便于备份 / 迁移；配合「音色列表」文本框粘贴即可复用 |
+| `/tts_export` | 导出当前音色配置为 JSON | — | 把已配置的所有音色（含批量导入）导出成 JSON（代码块或文件），便于备份 / 迁移；可再粘进「批量导入音色（JSON）」文本域复用 |
 | `/tts <文本>` | 临时朗读某段文本 | ❌ 一次性 | 念一次，不开启语音模式。例：`/tts 你好呀` |
 | `/tts_voice <音色名>` | 切换当前聊天的音色 | ✅ 持久 | 仅本聊天生效，其他聊天不受影响；不带参数可查看可用音色列表 |
 | 自然语言「以后用语音跟我交流」 | 模型自动开启语音 | ✅ 持久 | 由内置 Skill 引导模型调用 `set_voice_mode`（不靠写死关键词） |
@@ -38,7 +38,8 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 | `sample_rate` | `24000` | 采样率（Hz）。插件首次合成时会向服务端 `/` 接口查询真实采样率并自动覆盖此值 |
 | `timeout` | `60` | 请求超时（秒） |
 | `default_voice` | `""` | 默认音色名 |
-| `voices` | `{}` | 音色列表（**JSON 文本框**）：直接粘贴 JSON 批量配置，支持对象 `{"音色名":{"prompt_wav":"x.wav","prompt_text":"参考文本"}}` 或数组 `[{"name":"音色名","prompt_wav":"x.wav","prompt_text":"参考文本"}]`，保存自动生效 |
+| `voices` | `[]` | 音色列表（**template_list 逐条编辑**）：每条含「音色名 / 参考音频 / 参考文本」，可增删。要一次填很多条时，用下面「批量导入音色（JSON）」文本域粘贴 JSON 一键填充 |
+| `voices_bulk` | `""` | 批量导入音色（**JSON 文本域**）：粘贴 JSON 与上方「音色列表」合并生效（手动编辑项优先）。支持对象 `{"音色名":{"prompt_wav":"x.wav","prompt_text":"参考文本"}}` 或数组 `[{"name":"音色名","prompt_wav":"x.wav","prompt_text":"参考文本"}]`。导出用 `/tts_export` |
 | `send_mode` | `both` | `both` / `voice_only` |
 | `auto_tts` | `false` | 是否自动语音 |
 | `tts_scope` | `llm_only` | `llm_only` / `all_text` |
@@ -62,7 +63,7 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 ## 使用前提
 
 1. 部署 CosyVoice3 推理服务并监听 `base_url`（默认 50000）。
-2. 在「音色列表」配置项（JSON 文本框）里粘贴音色配置（对象或数组格式，见下方配置表 `voices`），并设置 `default_voice`。可从别处导出 JSON 粘贴而来，也可用 `/tts_export` 备份当前配置。
+2. 配置音色：可在「音色列表」里逐条添加（音色名 / 参考音频 / 参考文本），也可在「批量导入音色（JSON）」文本域一次性粘贴 JSON 填充（见配置表），并设置 `default_voice`。可用 `/tts_export` 备份当前配置。
 3. 常用操作见上方「指令一览」表，例如：
    - 在目标聊天发送 `/tts_on` 开启自动语音，`/tts 你好呀` 临时朗读，`/tts_voice 小明` 切换该聊天音色。
    - 对话中说「以后用语音跟我交流」让模型自动开启；说「别用语音了」自动关闭。
@@ -81,7 +82,7 @@ bash pack.sh
 python3 pack.py
 ```
 
-- 输出位于 `dist/astrbot_plugin_cosyvoice.zip`，zip 顶层目录即为插件名 `astrbot_plugin_cosyvoice/`，AstrBot 解压后可直接识别。
+- 输出位于 `dist/astrbot_plugin_cosyvoice_v<版本号>.zip`（同名不覆盖，重打会追加时间戳），zip 顶层目录即为插件名 `astrbot_plugin_cosyvoice/`，AstrBot 解压后可直接识别。
 - 自动排除无需上线的内容：`.git`、`__pycache__`、`*.pyc`、`.venv`、`node_modules`、`dist`、打包脚本自身。
 - `deploy/`（CosyVoice 服务端）也会一并打包进插件仓库 zip，但 AstrBot 运行时不会加载它；服务端需单独按 [deploy/README.md](./deploy/README.md) 在 CosyVoice 机器上部署。
 - 上传后记得在插件配置里填好 `base_url`、`server_voices_dir`、各音色的 `prompt_wav`（文件名）与 `prompt_text`，并重启插件生效。

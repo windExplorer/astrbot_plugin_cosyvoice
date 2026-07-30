@@ -37,12 +37,45 @@
     "default": ""
   },
   "voices": {
+    "type": "template_list",
+    "title": "音色列表",
+    "description": "逐条编辑音色（音色名 + 参考音频 + 参考文本）。需要一次填很多条时，可用下方「批量导入音色（JSON）」文本域粘贴 JSON 一键填充。",
+    "templates": {
+      "voice": {
+        "name": "音色",
+        "hint": "添加一个参考音色",
+        "display_item": "name",
+        "items": {
+          "name": {
+            "type": "string",
+            "title": "音色名",
+            "description": "唯一标识",
+            "hint": "用于 /tts_voice 切换与 LLM 工具指定"
+          },
+          "prompt_wav": {
+            "type": "string",
+            "title": "参考音频",
+            "description": "wav 文件名或路径",
+            "hint": "走服务端时只填文件名（配合上面的服务端目录）；走本端上传时填绝对/相对路径"
+          },
+          "prompt_text": {
+            "type": "string",
+            "title": "参考文本",
+            "description": "音频对应原文（可选）",
+            "hint": "服务端模式且服务端 voices.json 已存该文件名文本时可留空，服务端自动取；仅本端上传模式才需要填"
+          }
+        }
+      }
+    },
+    "default": []
+  },
+  "voices_bulk": {
     "type": "text",
-    "title": "音色列表（JSON）",
-    "description": "直接粘贴 JSON 批量配置音色（多行，保存后自动生效）。支持两种格式：\n① 对象：{\"音色名\": {\"prompt_wav\": \"xxx.wav\", \"prompt_text\": \"参考文本\"}}\n② 数组：[{\"name\": \"音色名\", \"prompt_wav\": \"xxx.wav\", \"prompt_text\": \"参考文本\"}]\n多写几项即可配置多个音色；prompt_text 在服务端已存文本时可留空。",
+    "title": "批量导入音色（JSON）",
+    "description": "一键粘贴 JSON 批量填充音色（多行，保存后自动与上方「音色列表」合并生效；手动编辑的项优先于此处）。支持对象 {\"音色名\":{\"prompt_wav\":\"x.wav\",\"prompt_text\":\"文本\"}} 或数组 [{\"name\":\"音色名\",\"prompt_wav\":\"x.wav\",\"prompt_text\":\"文本\"}]。导出可用 /tts_export 指令。",
     "editor_mode": true,
     "editor_language": "json",
-    "default": "{}"
+    "default": ""
   },
   "send_mode": {
     "type": "string",

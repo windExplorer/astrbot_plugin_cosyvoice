@@ -53,27 +53,47 @@ class TtsEngine:
         return {"prompt_wav": self.resolve_wav(prompt_wav), "prompt_text": prompt_text}
 
     # ---------- 音色解析 ----------
-    def update_voices(self, voices):
-        """归一化音色配置为内部 dict：{ 音色名: {prompt_wav, prompt_text} }。
+    def update_voices(self, voices, bulk=None):
+        """归一化并合并两个音色来源为内部 dict：{ 音色名: {prompt_wav, prompt_text} }。
 
-        兼容三种来源：
-        - 新版 text 类型：JSON 字符串（在配置面板 textarea 粘贴），自动 json.loads；
-        - 旧式 dict：{ 音色名: {prompt_wav, prompt_text} }
-        - list（template_list）：每项含 name/prompt_wav/prompt_text
-          （AstrBot 会附带 __template_key，忽略即可）
+        - voices: 主来源（原「音色列表」配置项）。兼容：
+            * template_list 的 list：每项含 name/prompt_wav/prompt_text
+              （AstrBot 会附带 __template_key，忽略即可）；
+            * 旧式 dict：{ 音色名: {prompt_wav, prompt_text} }；
+            * JSON 字符串（兼容历史 text 类型配置）。
+        - bulk: 选填，「批量导入音色」JSON 文本域（字符串/对象/数组），
+            用于一键粘贴填充大量音色。
+        两者合并，手动编辑的 voices 优先于批量导入（同名不覆盖手动项）。
         """
-        # 配置项现为 text 类型，voices 可能是用户粘贴的 JSON 字符串
+        base = self._norm_voices(voices)
+        if bulk is not None:
+            extra = self._norm_voices(bulk)
+            # 手动编辑的项优先级最高：base 覆盖 extra
+            merged = {**extra, **base}
+        else:
+            merged = base
+        self.voices = merged
+        # 诊断：读到了配置却解析为 0 个，多半是子项 name(音色名) 为空
+        if not merged and (voices or bulk):
+            raw = voices if not base else voices
+            logger.warning(
+                f"[cosyvoice] 已读到 voices 配置但解析出 0 个音色，"
+                f"请检查每项是否填写了「音色名」。原始内容(前500字): {repr(voices)[:500]}"
+            )
+        elif merged:
+            logger.info(f"[cosyvoice] 已加载 {len(merged)} 个音色: {list(merged.keys())}")
+
+    def _norm_voices(self, voices):
+        """把 str / dict / list 归一化为 { 音色名: {prompt_wav, prompt_text} }。"""
         if isinstance(voices, str):
             s = voices.strip()
             if not s or s in ("{}", "[]"):
-                self.voices = {}
-                return
+                return {}
             try:
                 voices = json.loads(s)
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"[cosyvoice] voices 配置解析失败（应为合法 JSON）：{e}")
-                self.voices = {}
-                return
+                logger.warning(f"[cosyvoice] 音色配置解析失败（应为合法 JSON）：{e}")
+                return {}
         d: dict = {}
         if isinstance(voices, dict):
             for k, v in voices.items():
@@ -93,15 +113,7 @@ class TtsEngine:
                     "prompt_wav": item.get("prompt_wav", "") or "",
                     "prompt_text": item.get("prompt_text", "") or "",
                 }
-        self.voices = d
-        # 诊断：读到了配置却解析为 0 个，多半是子项 name(音色名) 为空
-        if not d and voices:
-            logger.warning(
-                f"[cosyvoice] 已读到 voices 配置({type(voices).__name__})但解析出 0 个音色，"
-                f"请检查每项是否填写了「音色名」。原始内容(前500字): {repr(voices)[:500]}"
-            )
-        elif d:
-            logger.info(f"[cosyvoice] 已加载 {len(d)} 个音色: {list(d.keys())}")
+        return d
 
     def list_voices(self) -> list:
         return sorted(self.voices.keys())
