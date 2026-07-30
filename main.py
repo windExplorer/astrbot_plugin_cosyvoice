@@ -184,12 +184,12 @@ class CosyVoicePlugin(Star):
         self._refresh_cfg()
         self._set_flag(event, "is_llm", True)
 
-        # 记住本轮模型原文，供结果链文本缺失/异常（如混入 [] 占位符）时回退合成
+        # 记住本轮模型原文，供结果链文本缺失/异常（如混入 [] 占位符）时回退合成。
+        # 无论是否为空都覆盖写入，避免回退时误用上一轮的真实文本（tts_on 下会念错内容）。
         resp_text = getattr(resp, "completion_text", None) or getattr(resp, "text", "") or ""
         if isinstance(resp_text, list):
             resp_text = "".join(str(x) for x in resp_text)
-        if resp_text:
-            self._last_llm[event.unified_msg_origin] = resp_text
+        self._last_llm[event.unified_msg_origin] = resp_text
 
         cfg = self.config
 
