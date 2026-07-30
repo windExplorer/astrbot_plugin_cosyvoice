@@ -149,7 +149,7 @@ class CosyVoicePlugin(Star):
         merged.update({k: v for k, v in live.items() if v is not None})
         self.config = merged
         self.engine.config = merged
-        self.engine.update_voices(merged.get("voices") or {}, merged.get("voices_bulk"))
+        self.engine.update_voices(merged.get("voices") or {})
         return merged
 
     def _in_scope(self, event: AstrMessageEvent, cfg: dict) -> bool:

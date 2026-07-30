@@ -53,35 +53,23 @@ class TtsEngine:
         return {"prompt_wav": self.resolve_wav(prompt_wav), "prompt_text": prompt_text}
 
     # ---------- 音色解析 ----------
-    def update_voices(self, voices, bulk=None):
-        """归一化并合并两个音色来源为内部 dict：{ 音色名: {prompt_wav, prompt_text} }。
+    def update_voices(self, voices):
+        """归一化音色配置为内部 dict：{ 音色名: {prompt_wav, prompt_text} }。
 
-        - voices: 主来源（原「音色列表」配置项）。兼容：
-            * template_list 的 list：每项含 name/prompt_wav/prompt_text
-              （AstrBot 会附带 __template_key，忽略即可）；
-            * 旧式 dict：{ 音色名: {prompt_wav, prompt_text} }；
-            * JSON 字符串（兼容历史 text 类型配置）。
-        - bulk: 选填，「批量导入音色」JSON 文本域（字符串/对象/数组），
-            用于一键粘贴填充大量音色。
-        两者合并，手动编辑的 voices 优先于批量导入（同名不覆盖手动项）。
+        兼容三种来源：
+        - template_list 的 list：每项含 name/prompt_wav/prompt_text
+          （AstrBot 会附带 __template_key，忽略即可）；
+        - 旧式 dict：{ 音色名: {prompt_wav, prompt_text} }；
+        - 历史 text 类型的 JSON 字符串（兼容旧配置）。
         """
-        base = self._norm_voices(voices)
-        if bulk is not None:
-            extra = self._norm_voices(bulk)
-            # 手动编辑的项优先级最高：base 覆盖 extra
-            merged = {**extra, **base}
-        else:
-            merged = base
-        self.voices = merged
-        # 诊断：读到了配置却解析为 0 个，多半是子项 name(音色名) 为空
-        if not merged and (voices or bulk):
-            raw = voices if not base else voices
+        self.voices = self._norm_voices(voices)
+        if not self.voices and voices:
             logger.warning(
                 f"[cosyvoice] 已读到 voices 配置但解析出 0 个音色，"
                 f"请检查每项是否填写了「音色名」。原始内容(前500字): {repr(voices)[:500]}"
             )
-        elif merged:
-            logger.info(f"[cosyvoice] 已加载 {len(merged)} 个音色: {list(merged.keys())}")
+        elif self.voices:
+            logger.info(f"[cosyvoice] 已加载 {len(self.voices)} 个音色: {list(self.voices.keys())}")
 
     def _norm_voices(self, voices):
         """把 str / dict / list 归一化为 { 音色名: {prompt_wav, prompt_text} }。"""

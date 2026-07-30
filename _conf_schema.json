@@ -69,14 +69,6 @@
     },
     "default": []
   },
-  "voices_bulk": {
-    "type": "text",
-    "title": "批量导入音色（JSON）",
-    "description": "一键粘贴 JSON 批量填充音色（多行，保存后自动与上方「音色列表」合并生效；手动编辑的项优先于此处）。支持对象 {\"音色名\":{\"prompt_wav\":\"x.wav\",\"prompt_text\":\"文本\"}} 或数组 [{\"name\":\"音色名\",\"prompt_wav\":\"x.wav\",\"prompt_text\":\"文本\"}]。导出可用 /tts_export 指令。",
-    "editor_mode": true,
-    "editor_language": "json",
-    "default": ""
-  },
   "send_mode": {
     "type": "string",
     "title": "发送模式",
