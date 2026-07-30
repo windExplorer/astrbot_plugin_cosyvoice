@@ -349,6 +349,38 @@ class CosyVoicePlugin(Star):
         ]
         yield event.plain_result("\n".join(lines))
 
+    # ---------- 导出音色配置为 JSON（备份 / 迁移） ----------
+    @filter.command("tts_export")
+    async def tts_export_cmd(self, event: AstrMessageEvent):
+        self._refresh_cfg()
+        voices = self.engine.voices
+        if not voices:
+            yield event.plain_result(
+                "我这儿还没有任何音色配置，导出个寂寞～ 先去插件配置里把 JSON 粘贴进「音色列表」吧。"
+            )
+            return
+        json_str = json.dumps(voices, ensure_ascii=False, indent=2)
+        # 生成临时 .json 文件，便于直接保存；发送失败则回退为代码块
+        import tempfile
+
+        tmp = os.path.join(tempfile.gettempdir(), "astrbot_cosyvoice_voices.json")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(json_str)
+        except Exception:
+            tmp = None
+        file_comp = getattr(Comp, "File", None)
+        if tmp and file_comp is not None:
+            try:
+                yield event.chain_result([
+                    Comp.Plain("这是当前所有音色的 JSON（文件可直接存为 .json）："),
+                    file_comp(path=tmp),
+                ])
+                return
+            except Exception:
+                pass
+        yield event.plain_result(f"当前音色 JSON：\n```json\n{json_str}\n```")
+
     # ---------- LLM 函数调用工具 ----------
     @filter.llm_tool(name="text_to_speech")
     async def text_to_speech_tool(self, event: AstrMessageEvent, text: str, voice: str = ""):

@@ -2,6 +2,7 @@
 
 import os
 import re
+import json
 
 from astrbot.api import logger
 
@@ -55,11 +56,24 @@ class TtsEngine:
     def update_voices(self, voices):
         """归一化音色配置为内部 dict：{ 音色名: {prompt_wav, prompt_text} }。
 
-        兼容两种来源：
+        兼容三种来源：
+        - 新版 text 类型：JSON 字符串（在配置面板 textarea 粘贴），自动 json.loads；
         - 旧式 dict：{ 音色名: {prompt_wav, prompt_text} }
-        - 新版 template_list（list）：每项含 name/prompt_wav/prompt_text
+        - list（template_list）：每项含 name/prompt_wav/prompt_text
           （AstrBot 会附带 __template_key，忽略即可）
         """
+        # 配置项现为 text 类型，voices 可能是用户粘贴的 JSON 字符串
+        if isinstance(voices, str):
+            s = voices.strip()
+            if not s or s in ("{}", "[]"):
+                self.voices = {}
+                return
+            try:
+                voices = json.loads(s)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[cosyvoice] voices 配置解析失败（应为合法 JSON）：{e}")
+                self.voices = {}
+                return
         d: dict = {}
         if isinstance(voices, dict):
             for k, v in voices.items():
