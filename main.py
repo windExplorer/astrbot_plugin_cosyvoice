@@ -53,6 +53,9 @@ class CosyVoicePlugin(Star):
         self._flags: dict = {}
         # 本轮模型生成的原文（按会话），用于「结果链文本无效」时回退合成
         self._last_llm: dict = {}
+        # 本轮用户原始消息（按会话），供「用户要求用文字回复」的抑制判定跨钩子使用，
+        # 避免 on_decorating_result 阶段 message_str 已不可用时漏判 text_keywords。
+        self._last_user_msg: dict = {}
         # 语音服务器失联状态：True 时已提示过，避免每条消息重复刷屏；合成成功时复位
         self._server_down = False
         # 会话级语音开关（按群持久记忆）：unified_msg_origin -> True
@@ -173,6 +176,22 @@ class CosyVoicePlugin(Star):
         want = self._get_flag(event, "want", False)
         auto = bool(cfg.get("auto_tts", False))
         session_on = self._session_enabled(event)
+
+        # 用户明确要求「用文字回复」（如"用文字告诉/用文字发我"）时，本条不转语音。
+        # 直接在此判定并返回 False，不依赖 on_decorating_result 阶段的 suppress 标志，
+        # 避免 tts_on 下 message_str 不可用时漏判、仍把文字转成语音。
+        # 注意：仅当用户本轮确实发了含抑制词的消息才生效（使用跨钩子保存的原消息兜底）。
+        if cfg.get("enable_user_trigger", True):
+            user_msg = (event.message_str or "").strip() or self._last_user_msg.get(
+                event.unified_msg_origin, ""
+            )
+            text_kw = cfg.get("text_keywords", []) or []
+            if user_msg and any(kw and kw in user_msg for kw in text_kw):
+                logger.debug(
+                    "[cosyvoice] 用户要求文字回复（命中 text_keywords），本条跳过语音"
+                )
+                return False
+
         if cfg.get("tts_scope", "llm_only") == "llm_only":
             return bool(is_llm and (auto or want or session_on))
         # all_text：自动开启则全部；否则仅关键词/工具触发或本会话已开
@@ -196,6 +215,9 @@ class CosyVoicePlugin(Star):
         # 关键词触发
         if cfg.get("enable_user_trigger", True):
             msg = event.message_str or ""
+            # 跨钩子保存用户原消息，供 _should_tts 的 text_keywords 抑制判定兜底使用
+            if msg:
+                self._last_user_msg[event.unified_msg_origin] = msg
             keywords = cfg.get("trigger_keywords", []) or []
             if any(kw and kw in msg for kw in keywords):
                 self._set_flag(event, "want", True)
