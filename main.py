@@ -197,24 +197,6 @@ class CosyVoicePlugin(Star):
         # all_text：自动开启则全部；否则仅关键词/工具触发或本会话已开
         return bool(auto or want or session_on)
 
-    # ---------- 语音合成 + 分段/合并发送辅助 ----------
-    async def _voice_wavs(self, text: str, voice_name: str | None = None):
-        """合成文本并返回语音文件信息。
-
-        返回 ``("merged", path)``（合并：全部段拼成 1 个 wav）或
-        ``("segments", [path, ...])``（不合并：每段 1 个 wav，按序）。
-        无可用音色 / 无有效文本 / 全部失败时返回 ``(None, None)``。
-
-        服务器失联（CosyVoiceServerError）会向上抛出，由调用方给出专门提示。
-        """
-        cfg = self.config
-        merge = bool(cfg.get("segment_merge", False))
-        if merge:
-            path = await self.engine.synthesize(text, voice_name)
-            return ("merged", path) if path else (None, None)
-        wavs = [w async for w in self.engine.iter_segment_wavs(text, voice_name)]
-        return ("segments", wavs) if wavs else (None, None)
-
     @staticmethod
     def _to_records(paths: list) -> list:
         """把 wav 路径列表转成 Record 组件列表（并登记清理）。"""
@@ -223,6 +205,23 @@ class CosyVoicePlugin(Star):
             recs.append(Comp.Record(file=p, url=p))
             audio.schedule_cleanup(p)
         return recs
+
+    async def _realtime_send(self, event: AstrMessageEvent, records: list):
+        """实时发送一段语音：优先用 event.send 主动推送一条独立消息（服务端返回一段即发一段）；
+        若当前 AstrBot 版本的 event 不支持 send（无该方法），则回退把 Record 追加到结果链，
+        由钩子返回后统一发出（多数平台仍会顺序播放多个语音）。
+        """
+        send = getattr(event, "send", None)
+        if callable(send):
+            try:
+                await send(event.chain_result(records))
+                return
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[cosyvoice] event.send 实时发送失败，回退追加到链: {e}")
+        # 回退：直接 append，交给 on_decorating_result 的 result.chain 统一发送
+        result = getattr(event, "result", None)
+        if result is not None and hasattr(result, "chain"):
+            result.chain.extend(records)
 
     # ---------- LLM 回复钩子：标记 + 关键词触发 ----------
     @filter.on_llm_response()
@@ -299,8 +298,39 @@ class CosyVoicePlugin(Star):
             return
 
         voice = self._get_flag(event, "voice", None) or self._session_voice(event)
+        send_mode = cfg.get("send_mode", "both")
+        merge = bool(cfg.get("segment_merge", False))
         try:
-            kind, payload = await self._voice_wavs(full_text, voice)
+            if merge:
+                # 合并模式：全部合成完拼成一个音频，仍可塞进发送链（钩子返回后统一发出）
+                path = await self.engine.synthesize(full_text, voice)
+                if not path:
+                    logger.warning("[cosyvoice] 合成失败，仅发送文本")
+                    return
+                self._server_down = False
+                if send_mode == "voice_only":
+                    result.chain = [c for c in chain if not isinstance(c, Comp.Plain)] + [
+                        Comp.Record(file=path, url=path)
+                    ]
+                else:
+                    chain.append(Comp.Record(file=path, url=path))
+                audio.schedule_cleanup(path)
+            else:
+                # 不合并：逐段合成、服务端返回一段就立即发一段（真正的流式发送）。
+                # voice_only 模式下把原文从最终链移除（文字由 LLM completion_text 存入会话历史，不丢），
+                # 只把语音逐条主动发出；both 模式原文仍由 AstrBot 正常发送，语音逐条附发。
+                if send_mode == "voice_only":
+                    result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
+                sent_any = False
+                async for wav in self.engine.iter_segment_wavs(full_text, voice):
+                    sent_any = True
+                    self._server_down = False
+                    rec = Comp.Record(file=wav, url=wav)
+                    audio.schedule_cleanup(wav)
+                    await self._realtime_send(event, [rec])
+                if not sent_any:
+                    logger.warning("[cosyvoice] 合成失败，仅发送文本")
+                    return
         except CosyVoiceServerError:
             self._clear(event)
             logger.warning("[cosyvoice] 语音服务器失联，仅发送文本")
@@ -310,22 +340,6 @@ class CosyVoicePlugin(Star):
                 chain.append(Comp.Plain(SERVER_DOWN_TIP))
             return
         self._clear(event)
-        if kind is None:
-            logger.warning("[cosyvoice] 合成失败，仅发送文本")
-            return
-        self._server_down = False  # 成功拿到音频，说明服务器已恢复
-
-        send_mode = cfg.get("send_mode", "both")
-        if send_mode == "voice_only":
-            # 仅发语音：从发送链移除原文，但 LLM 的 completion_text 已由 AstrBot
-            # 单独存入会话历史，文字不会丢失（both 模式天然满足，voice_only 依赖此机制）。
-            recs = self._to_records(payload if kind == "segments" else [payload])
-            result.chain = [c for c in chain if not isinstance(c, Comp.Plain)] + recs
-        else:
-            # both：原文 Plain 保留，语音 Record 追加到链（合并=1 个，不合并=每段 1 个）
-            for p in (payload if kind == "segments" else [payload]):
-                chain.append(Comp.Record(file=p, url=p))
-                audio.schedule_cleanup(p)
 
     # ---------- 用户指令：/tts <文本> ----------
     @filter.command("tts")
@@ -339,28 +353,33 @@ class CosyVoicePlugin(Star):
             return
 
         self._set_flag(event, "suppress", True)
+        send_mode = self.config.get("send_mode", "both")
+        merge = bool(self.config.get("segment_merge", False))
         try:
-            kind, payload = await self._voice_wavs(text, self._session_voice(event))
+            if merge:
+                path = await self.engine.synthesize(text, self._session_voice(event))
+                if not path:
+                    yield event.plain_result("哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？")
+                    return
+                if send_mode == "both":
+                    yield event.chain_result([Comp.Plain(text), Comp.Record(file=path, url=path)])
+                else:
+                    yield event.chain_result([Comp.Record(file=path, url=path)])
+                audio.schedule_cleanup(path)
+            else:
+                # 不合并：边合成边逐段 yield（每段独立一条消息，服务端返回一段即发一段）
+                if send_mode == "both":
+                    yield event.plain_result(text)
+                sent = False
+                async for wav in self.engine.iter_segment_wavs(text, self._session_voice(event)):
+                    sent = True
+                    yield event.chain_result([Comp.Record(file=wav, url=wav)])
+                    audio.schedule_cleanup(wav)
+                if not sent:
+                    yield event.plain_result("哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？")
         except CosyVoiceServerError:
             yield event.plain_result(SERVER_DOWN_TIP)
             return
-        if kind is None:
-            yield event.plain_result("哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？")
-            return
-
-        if self.config.get("send_mode", "both") == "both":
-            # 合并：文字 + 单个语音；不合并：每段一个语音（文字照发一次）
-            if kind == "merged":
-                yield event.chain_result([Comp.Plain(text), Comp.Record(file=payload, url=payload)])
-                audio.schedule_cleanup(payload)
-            else:
-                yield event.plain_result(text)
-                for p in payload:
-                    yield event.chain_result([Comp.Record(file=p, url=p)])
-                    audio.schedule_cleanup(p)
-        else:
-            recs = self._to_records(payload if kind == "segments" else [payload])
-            yield event.chain_result(recs)
 
     # ---------- 用户指令：/tts_voice <音色名> ----------
     @filter.command("tts_voice")
@@ -485,27 +504,33 @@ class CosyVoicePlugin(Star):
                 return
 
         target_voice = voice or self._session_voice(event)
+        send_mode = self.config.get("send_mode", "both")
+        merge = bool(self.config.get("segment_merge", False))
         try:
-            kind, payload = await self._voice_wavs(text.strip(), target_voice)
+            if merge:
+                path = await self.engine.synthesize(text.strip(), target_voice)
+                if not path:
+                    yield event.plain_result("话到嘴边卡壳了，这次没念出来，待会儿再试试？")
+                    return
+                if send_mode == "both":
+                    yield event.chain_result([Comp.Plain(text), Comp.Record(file=path, url=path)])
+                else:
+                    yield event.chain_result([Comp.Record(file=path, url=path)])
+                audio.schedule_cleanup(path)
+            else:
+                # 不合并：边合成边逐段 yield（每段独立一条消息，服务端返回一段即发一段）
+                if send_mode == "both":
+                    yield event.plain_result(text)
+                sent = False
+                async for wav in self.engine.iter_segment_wavs(text.strip(), target_voice):
+                    sent = True
+                    yield event.chain_result([Comp.Record(file=wav, url=wav)])
+                    audio.schedule_cleanup(wav)
+                if not sent:
+                    yield event.plain_result("话到嘴边卡壳了，这次没念出来，待会儿再试试？")
         except CosyVoiceServerError:
             yield event.plain_result(SERVER_DOWN_TIP)
             return
-        if kind is None:
-            yield event.plain_result("话到嘴边卡壳了，这次没念出来，待会儿再试试？")
-            return
-
-        if self.config.get("send_mode", "both") == "both":
-            if kind == "merged":
-                yield event.chain_result([Comp.Plain(text), Comp.Record(file=payload, url=payload)])
-                audio.schedule_cleanup(payload)
-            else:
-                yield event.plain_result(text)
-                for p in payload:
-                    yield event.chain_result([Comp.Record(file=p, url=p)])
-                    audio.schedule_cleanup(p)
-        else:
-            recs = self._to_records(payload if kind == "segments" else [payload])
-            yield event.chain_result(recs)
 
     # ---------- LLM 工具：自然语言开关当前会话语音模式 ----------
     @filter.llm_tool(name="set_voice_mode")
