@@ -256,6 +256,32 @@ class CosyVoicePlugin(Star):
         if result is not None and hasattr(result, "chain"):
             result.chain.extend(records)
 
+    async def _after_voice_sent(
+        self, event: AstrMessageEvent, cfg: dict, text: str, send_mode: str
+    ):
+        """发语音成功后，把本轮内容补回会话上下文，避免 AI 下一轮“不知道自己发了语音/
+        丢了那轮内容”。
+
+        采用版本无关、零报错风险的方式（只操作结果链，不调用不确定的 context API）：
+        - voice_only：把本轮文字补回结果链（否则历史可能为空导致 AI 失忆；文字由 LLM
+          completion_text 存入会话历史，这里只是兜底确保可见/可记忆）。
+        - both：追加一条简短标记「🎙️（以上已用语音播报）」，让 AI 明确上一轮是语音。
+        配置项 tts_context_hint=false 时完全不补。
+        """
+        if not cfg.get("tts_context_hint", True):
+            return
+        result = getattr(event, "result", None)
+        if result is None or not hasattr(result, "chain"):
+            return
+        if send_mode == "voice_only":
+            # 该模式下原文已从链移除，补回文字避免会话历史为空
+            if text and not any(isinstance(c, Comp.Plain) for c in result.chain):
+                result.chain.insert(0, Comp.Plain(text))
+        else:
+            # both：追加一条语音标记，AI 与用户都能明确上一轮是语音播报
+            if text:
+                result.chain.append(Comp.Plain("🎙️（以上已用语音播报）"))
+
     # ---------- LLM 回复钩子：标记 + 关键词触发 ----------
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
@@ -348,6 +374,7 @@ class CosyVoicePlugin(Star):
                 else:
                     chain.append(Comp.Record(file=path, url=path))
                 audio.schedule_cleanup(path)
+                await self._after_voice_sent(event, cfg, full_text, send_mode)
             else:
                 # 不合并：逐段合成、服务端返回一段就立即发一段（真正的流式发送）。
                 # voice_only 模式下把原文从最终链移除（文字由 LLM completion_text 存入会话历史，不丢），
@@ -364,6 +391,8 @@ class CosyVoicePlugin(Star):
                 if not sent_any:
                     logger.warning("[cosyvoice] 合成失败，仅发送文本")
                     return
+                # 流式逐段发完后，补回会话上下文提示（voice_only 下补回文字防失忆）
+                await self._after_voice_sent(event, cfg, full_text, send_mode)
         except CosyVoiceServerError:
             self._clear(event)
             logger.warning("[cosyvoice] 语音服务器失联，仅发送文本")
