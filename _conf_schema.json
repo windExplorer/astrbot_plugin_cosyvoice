@@ -156,16 +156,37 @@
   "segment_len": {
     "type": "int",
     "title": "分段回复字数",
-    "description": "按字数窗口+命中分段符号切分，用于长文逐段快速合成",
-    "hint": "0=关闭分段（回退到 max_text_len 旧逻辑）；>0 时每段取前 N 字范围内最后一个命中的分段符号，以它前面（含符号）为一段，下一段从该符号后继续。与 max_text_len 互相独立，不会被它截断。",
+    "description": "每段（首段除外）的字数窗口，配合分段符号切分，用于长文逐段快速合成",
+    "hint": "0=关闭分段（回退到 max_text_len 旧逻辑）；>0 时每段取前 N 字范围内最后一个命中的分段符号，以它前面（含符号）为一段。窗口内无标点时的处理见 segment_nopunct。与 max_text_len 互相独立。",
+    "default": 0
+  },
+  "segment_first_len": {
+    "type": "int",
+    "title": "首段字数",
+    "description": "首段独立的字数窗口（区别于后续每段）",
+    "hint": "0=首段使用「分段回复字数(segment_len)」；>0 时首段单独取前 N 字范围内最后一个命中的分段符号切分（让首段更快出声）。首段无标点的处理见 segment_first_nopunct。",
     "default": 0
   },
   "segment_punct": {
     "type": "string",
     "title": "分段符号",
-    "description": "在 segment_len 窗口内命中即切分，按字面值匹配（自动转义，无需写正则）",
+    "description": "在分段窗口内命中即切分，按字面值匹配（自动转义，无需写正则）",
     "hint": "例如「，。！？」遇逗号/句号/感叹号/问号即分段；留空使用默认标点集「，。！？；：、,.!?;:」",
     "default": "，。！？；：、,.!?;:"
+  },
+  "segment_first_nopunct": {
+    "type": "string",
+    "title": "首段无标点规则",
+    "description": "首段字数窗口内没有命中任何分段符号时的处理",
+    "hint": "truncate（默认）=直接在窗口末硬切；seek=往后（超出首段窗口）找第一个命中的分段符号切在那里，若到结尾都无标点则整段剩余作为一段。",
+    "default": "truncate"
+  },
+  "segment_nopunct": {
+    "type": "string",
+    "title": "普通段无标点规则",
+    "description": "首段之外的每段，字数窗口内没有命中任何分段符号时的处理",
+    "hint": "truncate（默认）=直接在窗口末硬切；seek=往后（超出本段窗口）找第一个命中的分段符号切在那里，若到结尾都无标点则整段剩余作为一段。",
+    "default": "truncate"
   },
   "segment_merge": {
     "type": "bool",

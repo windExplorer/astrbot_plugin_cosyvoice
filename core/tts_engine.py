@@ -163,6 +163,25 @@ class TtsEngine:
         """旧分段逻辑窗口：仅在 segment_len 关闭（<=0）时生效，沿用 max_text_len。"""
         return int(self.config.get("max_text_len", 0) or 0)
 
+    def _seg_first_window(self) -> int:
+        """首段字数窗口：segment_first_len > 0 时用它，否则回退到普通 segment_len。"""
+        first = int(self.config.get("segment_first_len", 0) or 0)
+        if first > 0:
+            return first
+        return self._seg_window()
+
+    def _seg_nopunct_mode(self, which: str) -> str:
+        """无标点时的处理模式：
+
+        - ``truncate``（默认）：窗口内无命中符号，直接在该窗口末硬切。
+        - ``seek``：窗口内无命中符号，继续往后（超出窗口）找【第一个】命中的分段符号切在那里；
+          若到结尾都找不到，则整段剩余作为一段。
+        ``which`` 取 ``"first"``（首段，读 segment_first_nopunct）或 ``"body"``（普通段，读 segment_nopunct）。
+        """
+        key = "segment_first_nopunct" if which == "first" else "segment_nopunct"
+        val = (self.config.get(key, "") or "").strip().lower()
+        return "seek" if val == "seek" else "truncate"
+
     def _seg_punct_class(self) -> str:
         """把配置的 seg 分段符号拼成一个正则字符类（自动转义）。空则退回常见标点。"""
         raw = (self.config.get("segment_punct", "") or "").strip()
@@ -182,36 +201,54 @@ class TtsEngine:
             # 分段关闭：回退到旧 max_text_len 逻辑（按句切 + 超长硬切）
             return self._legacy_split(text)
 
-        # 新分段逻辑：窗口 = segment_len，max_text_len 不参与，仅作「无标点硬切」兜底
+        # 新分段逻辑：窗口 = segment_len，首段可用独立的 segment_first_len。
+        # max_text_len 不参与窗口，仅作 truncate 模式下「无标点硬切」的兜底上限。
         hard_cap = self._seg_hard_cap()
         punct = self._seg_punct_class()
         punct_re = re.compile(punct)
         n = len(text)
         chunks: list = []
         start = 0
+        is_first = True
         while start < n:
-            # 本段上限：优先 segment_len 窗口；若该段无标点，则单段仍不超过 hard_cap（0=不限）
-            end = min(start + window, n)
+            w = self._seg_first_window() if is_first else window
+            end = min(start + w, n)
             # 在 [start, end) 窗口内找【最后一个】命中的分段符号：
             # 取窗口内字数范围内最后一个标点，以它前面（含符号）为一段。
             last = None
             for m in punct_re.finditer(text, start, end):
                 last = m
             if last is not None:
-                # 段 = 从 start 到最后一个命中标点（含），下一段从标点后开始
                 cut = last.end()
                 seg = text[start:cut].strip()
                 if seg:
                     chunks.append(seg)
                 start = cut
             else:
-                # 窗口内无命中符号：硬切。若配置了 hard_cap(>0) 且窗口超过它，按 hard_cap 切；
-                # 否则直接切到窗口末（仍 strip 去除首尾空白/换行）。
-                cut = min(end, start + hard_cap) if hard_cap > 0 else end
-                seg = text[start:cut].strip()
-                if seg:
-                    chunks.append(seg)
-                start = cut
+                mode = self._seg_nopunct_mode("first" if is_first else "body")
+                if mode == "seek":
+                    # 窗口内无标点：往后（超出窗口）找第一个命中的分段符号
+                    nxt = punct_re.search(text, end)
+                    if nxt is not None:
+                        cut = nxt.end()
+                        seg = text[start:cut].strip()
+                        if seg:
+                            chunks.append(seg)
+                        start = cut
+                    else:
+                        # 到结尾都无标点：剩余整段作为一段
+                        seg = text[start:n].strip()
+                        if seg:
+                            chunks.append(seg)
+                        start = n
+                else:
+                    # truncate：窗口内无标点，直接在窗口末（受 hard_cap 兜底）硬切
+                    cut = min(end, start + hard_cap) if hard_cap > 0 else end
+                    seg = text[start:cut].strip()
+                    if seg:
+                        chunks.append(seg)
+                    start = cut
+            is_first = False
         return chunks
 
     def _legacy_split(self, text: str) -> list:
