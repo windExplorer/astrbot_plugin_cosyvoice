@@ -14,6 +14,7 @@ AstrBot 单独存入会话历史，因此记忆插件与大模型下一轮都能
 import os
 import re
 import json
+import random
 
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
@@ -128,7 +129,27 @@ class CosyVoicePlugin(Star):
             json.dump(self._sessions, f, ensure_ascii=False, indent=2)
 
     def _session_enabled(self, event: AstrMessageEvent) -> bool:
-        return bool(self._sessions.get(event.unified_msg_origin, False))
+        return event.unified_msg_origin in self._sessions
+
+    def _session_prob(self, event: AstrMessageEvent) -> float | None:
+        """返回该会话的语音发送概率：1.0=常开（一直发），0~1=概率触发，None=未开启。
+
+        兼容旧数据：存 True / "always" 视为 1.0；存数字（str/float）视为对应概率。
+        """
+        v = self._sessions.get(event.unified_msg_origin, None)
+        if v is None or v is False:
+            return None
+        if v is True or (isinstance(v, str) and v.strip().lower() in ("always", "true", "1")):
+            return 1.0
+        try:
+            p = float(v)
+        except (TypeError, ValueError):
+            return 1.0
+        if p >= 1.0:
+            return 1.0
+        if p <= 0.0:
+            return 0.0
+        return p
 
     def _load_voices(self) -> dict:
         try:
@@ -175,7 +196,8 @@ class CosyVoicePlugin(Star):
         is_llm = self._get_flag(event, "is_llm", False)
         want = self._get_flag(event, "want", False)
         auto = bool(cfg.get("auto_tts", False))
-        session_on = self._session_enabled(event)
+        prob = self._session_prob(event)
+        session_on = prob is not None
 
         # 用户明确要求「用文字回复」（如"用文字告诉/用文字发我"）时，本条不转语音。
         # 直接在此判定并返回 False，不依赖 on_decorating_result 阶段的 suppress 标志，
@@ -193,9 +215,20 @@ class CosyVoicePlugin(Star):
                 return False
 
         if cfg.get("tts_scope", "llm_only") == "llm_only":
-            return bool(is_llm and (auto or want or session_on))
-        # all_text：自动开启则全部；否则仅关键词/工具触发或本会话已开
-        return bool(auto or want or session_on)
+            base = bool(is_llm and (auto or want or session_on))
+        else:
+            # all_text：自动开启则全部；否则仅关键词/工具触发或本会话已开
+            base = bool(auto or want or session_on)
+
+        # 概率触发：仅当「纯靠 tts_on 会话开关」触发（非 auto、非明确关键词/工具触发）时，
+        # 才按会话概率决定是否发语音；auto_tts 或用户明确触发的仍照常发。
+        if base and session_on and prob is not None and prob < 1.0 and not (auto or want):
+            if random.random() >= prob:
+                logger.debug(
+                    f"[cosyvoice] 本轮语音概率未命中（p={prob}），仅发文字"
+                )
+                return False
+        return base
 
     @staticmethod
     def _to_records(paths: list) -> list:
@@ -407,15 +440,51 @@ class CosyVoicePlugin(Star):
             f"好嘞，这个聊天以后都用「{name}」这个嗓音啦～"
         )
 
-    # ---------- 会话级开关：/tts_on 当前群一直语音，/tts_off 关闭 ----------
+    # ---------- 会话级开关：/tts_on 当前群语音，可带概率参数（如 /tts_on 0.8） ----------
     @filter.command("tts_on")
     async def tts_on_cmd(self, event: AstrMessageEvent):
         self._refresh_cfg()
         origin = event.unified_msg_origin
-        self._sessions[origin] = True
+        raw = (event.message_str or "").strip()
+        # 去掉 /tts_on 命令前缀（兼容已剥离/未剥离与 @提及），取参数
+        arg = re.sub(r"^[/\s@]*tts_on\b\s*", "", raw, flags=re.IGNORECASE).strip()
+
+        if not arg or arg.lower() in ("always", "true", "1"):
+            # 不带参数或显式 always/1：常开（一直发语音）
+            self._sessions[origin] = True
+            self._save_sessions()
+            yield event.plain_result(
+                "收到～ 从这个聊天开始，我每句回复都给你念出来啦（想静音就发 /tts_off）。"
+            )
+            return
+
+        # 尝试解析概率：支持 0.8 / 0.8 / 80% 等形式
+        m = re.search(r"(\d+(?:\.\d+)?)\s*%?", arg)
+        if not m:
+            yield event.plain_result(
+                "这个概率我有点没看懂～ 你可以这样用：\n"
+                "/tts_on 常开语音\n/tts_on 0.8 有 80% 概率发语音\n/tts_on 1 一直发语音"
+            )
+            return
+        try:
+            p = float(m.group(1))
+        except ValueError:
+            p = -1
+        if arg.rstrip().endswith("%"):
+            p = p / 100
+        if p >= 1.0:
+            self._sessions[origin] = True
+            self._save_sessions()
+            yield event.plain_result("收到～ 这个聊天我会一直给你念出来啦（/tts_off 可静音）。")
+            return
+        if p <= 0.0:
+            yield event.plain_result("概率得大于 0 呀～ 用 /tts_on 0.8 这种，或者不带参数就是一直念。")
+            return
+        self._sessions[origin] = p
         self._save_sessions()
         yield event.plain_result(
-            "收到～ 从这个聊天开始，我每句回复都给你念出来啦（想静音就发 /tts_off）。"
+            f"好嘞～ 这个聊天之后约有 {int(p * 100)}% 的概率给你念出来（每次回复随机抽），"
+            f"想静音就 /tts_off，想一直念就 /tts_on 不带参数。"
         )
 
     @filter.command("tts_off")
@@ -432,11 +501,18 @@ class CosyVoicePlugin(Star):
     @filter.command("tts_status")
     async def tts_status_cmd(self, event: AstrMessageEvent):
         self._refresh_cfg()
-        on = self._session_enabled(event)
+        prob = self._session_prob(event)
+        on = prob is not None
+        if not on:
+            mode_hint = "未开启 🔇"
+        elif prob >= 1.0:
+            mode_hint = "常开（每句都念）🔊"
+        else:
+            mode_hint = f"概率触发（约 {int(prob * 100)}% 发语音）🎲"
         session_voice = self._session_voice(event)
         default_voice = self.config.get("default_voice") or ""
         lines = [
-            f"自动语音开关：{'已开启 🔊' if on else '未开启 🔇'}",
+            f"自动语音开关：{mode_hint}",
             f"当前聊天音色：{session_voice or '（未单独设置）'}",
             f"全局默认音色：{default_voice or '（未配置）'}",
         ]
