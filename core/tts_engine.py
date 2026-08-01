@@ -178,11 +178,14 @@ class TtsEngine:
         start = 0
         while start < n:
             end = min(start + window, n)
-            # 在 [start, end) 窗口内找第一个命中的分段符号
-            m = punct_re.search(text, start, end)
-            if m:
-                # 段 = 从 start 到命中标点（含），下一段从标点后开始
-                cut = m.end()
+            # 在 [start, end) 窗口内找【最后一个】命中的分段符号：
+            # 取窗口内 30 字范围内最后一个标点，以它前面（含符号）为一段。
+            last = None
+            for m in punct_re.finditer(text, start, end):
+                last = m
+            if last is not None:
+                # 段 = 从 start 到最后一个命中标点（含），下一段从标点后开始
+                cut = last.end()
                 seg = text[start:cut].strip()
                 if seg:
                     chunks.append(seg)
