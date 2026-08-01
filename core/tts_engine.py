@@ -141,36 +141,58 @@ class TtsEngine:
         return None, None, None
 
     # ---------- 长文本分片 ----------
-    _SENT_SPLIT = re.compile(r"(?<=[。！？!?\n])")
+    def _seg_window(self) -> int:
+        """分段字数窗口：优先 segment_len，其次 max_text_len 作为兜底硬上限。
+
+        - segment_len > 0：按用户配置的分段字数（配合 segment_punct 在窗口内命中标点处切）。
+        - 否则 max_text_len > 0：按旧逻辑的长度上限硬切。
+        - 都未配置（<=0）：不分段，整段返回。
+        """
+        seg = int(self.config.get("segment_len", 0) or 0)
+        if seg > 0:
+            cap = int(self.config.get("max_text_len", 0) or 0)
+            return min(seg, cap) if cap > 0 else seg
+        return int(self.config.get("max_text_len", 0) or 0)
+
+    def _seg_punct_class(self) -> str:
+        """把配置的 seg 分段符号拼成一个正则字符类（自动转义）。空则退回常见标点。"""
+        raw = (self.config.get("segment_punct", "") or "").strip()
+        if not raw:
+            raw = "，。！？；：、,.!?;:"
+        # 转义每个字符，避免用户输入的正则元字符（如 . * +）产生意外匹配
+        esc = "".join(re.escape(ch) for ch in raw)
+        return f"[{esc}]"
 
     def split_text(self, text: str) -> list:
-        max_len = int(self.config.get("max_text_len", 0) or 0)
         text = (text or "").strip()
         if not text:
             return []
-        if max_len <= 0:
+        window = self._seg_window()
+        if window <= 0:
             return [text]
 
+        punct = self._seg_punct_class()
+        punct_re = re.compile(punct)
+        n = len(text)
         chunks: list = []
-        buf = ""
-        for seg in self._SENT_SPLIT.split(text):
-            seg = seg.strip()
-            if not seg:
-                continue
-            if len(buf) + len(seg) <= max_len:
-                buf += seg
+        start = 0
+        while start < n:
+            end = min(start + window, n)
+            # 在 [start, end) 窗口内找第一个命中的分段符号
+            m = punct_re.search(text, start, end)
+            if m:
+                # 段 = 从 start 到命中标点（含），下一段从标点后开始
+                cut = m.end()
+                seg = text[start:cut].strip()
+                if seg:
+                    chunks.append(seg)
+                start = cut
             else:
-                if buf:
-                    chunks.append(buf)
-                # 单句超长则硬切
-                if len(seg) > max_len:
-                    for i in range(0, len(seg), max_len):
-                        chunks.append(seg[i : i + max_len])
-                    buf = ""
-                else:
-                    buf = seg
-        if buf:
-            chunks.append(buf)
+                # 窗口内无命中符号：硬切到窗口末（仍 strip 去除首尾空白/换行）
+                seg = text[start:end].strip()
+                if seg:
+                    chunks.append(seg)
+                start = end
         return chunks
 
     # ---------- 合成 ----------
@@ -206,3 +228,32 @@ class TtsEngine:
         except Exception as e:  # noqa: BLE001
             logger.error(f"[cosyvoice] 语音合成失败: {e}")
             return None
+
+    async def iter_segment_wavs(self, text: str, voice_name: str | None = None):
+        """逐段合成，依次 yield 每段生成的临时 wav 文件路径。
+
+        用于「不合并」模式：每段生成完即可发给用户，无需等全部完成。
+        服务器失联（CosyVoiceServerError）会向上抛出；单段推理失败则跳过该段继续。
+        """
+        name, prompt_wav, prompt_text = self.resolve_voice(voice_name)
+        if name is None:
+            logger.warning(
+                f"[cosyvoice] 未配置任何可用音色，跳过语音合成。"
+                f"运行实例读到的 raw voices={repr(self.config.get('voices'))[:300]}"
+            )
+            return
+        chunks = [c for c in self.split_text(text) if is_speakable(c)]
+        if not chunks:
+            logger.debug("[cosyvoice] 无有效可合成文本，跳过语音合成")
+            return
+        kwargs = self._wav_kwargs(prompt_wav, prompt_text)
+        for ch in chunks:
+            try:
+                pcm = await self.client.synthesize(ch, mode="zero_shot", **kwargs)
+            except CosyVoiceServerError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"[cosyvoice] 单段合成失败已跳过: {e}")
+                continue
+            if pcm:
+                yield audio.pcm_to_wav_file(pcm, self.client.sample_rate, self.client.cache_dir)

@@ -152,5 +152,26 @@
     "description": "超出则切分",
     "hint": "默认 200；0 表示不限制，超出此长度将切分后分别合成并拼接",
     "default": 200
+  },
+  "segment_len": {
+    "type": "int",
+    "title": "分段回复字数",
+    "description": "按字数窗口+命中分段符号切分，用于长文逐段快速合成",
+    "hint": "0=关闭分段（整段合成）；>0 时每段在前 N 字内出现的第一个分段符号处断开，下一段从该符号后继续。优先于 max_text_len，二者同时配置则取较小值作兜底上限。",
+    "default": 0
+  },
+  "segment_punct": {
+    "type": "string",
+    "title": "分段符号",
+    "description": "在 segment_len 窗口内命中即切分，按字面值匹配（自动转义，无需写正则）",
+    "hint": "例如「，。！？」遇逗号/句号/感叹号/问号即分段；留空使用默认标点集「，。！？；：、,.!?;:」",
+    "default": "，。！？；：、,.!?;:"
+  },
+  "segment_merge": {
+    "type": "bool",
+    "title": "分段合并发送",
+    "description": "分段回复是否合并为单条语音发送",
+    "hint": "false=不合并：每段生成完立即发送（多条语音）；true=合并：全部生成完后拼接成一个音频再发。默认 false。",
+    "default": false
   }
 }
