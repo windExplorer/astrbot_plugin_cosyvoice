@@ -142,16 +142,25 @@ class TtsEngine:
 
     # ---------- 长文本分片 ----------
     def _seg_window(self) -> int:
-        """分段字数窗口：优先 segment_len，其次 max_text_len 作为兜底硬上限。
+        """分段字数窗口（仅由 segment_len 决定，与 max_text_len 解耦）。
 
-        - segment_len > 0：按用户配置的分段字数（配合 segment_punct 在窗口内命中标点处切）。
-        - 否则 max_text_len > 0：按旧逻辑的长度上限硬切。
-        - 都未配置（<=0）：不分段，整段返回。
+        - segment_len > 0：按用户配置的分段字数（配合 segment_punct 在窗口内命中标点处切），
+          窗口就是 segment_len 本身，不受 max_text_len 影响。
+        - segment_len <= 0（关闭分段）：返回 0，由调用方回退到旧 max_text_len 逻辑。
         """
-        seg = int(self.config.get("segment_len", 0) or 0)
-        if seg > 0:
-            cap = int(self.config.get("max_text_len", 0) or 0)
-            return min(seg, cap) if cap > 0 else seg
+        return int(self.config.get("segment_len", 0) or 0)
+
+    def _seg_hard_cap(self) -> int:
+        """单段绝对硬上限（仅作用于「窗口内无命中符号时的硬切」）。
+
+        由 max_text_len 决定，与 segment_len 独立：即使分段窗口很大，单段也不会超过此值，
+        防止极长无标点文本把整段一次性甩给服务端。0 表示不限制。
+        仅在 segment_len > 0（新分段逻辑）时作为兜底生效；旧逻辑由 _legacy_window 处理。
+        """
+        return int(self.config.get("max_text_len", 0) or 0)
+
+    def _legacy_window(self) -> int:
+        """旧分段逻辑窗口：仅在 segment_len 关闭（<=0）时生效，沿用 max_text_len。"""
         return int(self.config.get("max_text_len", 0) or 0)
 
     def _seg_punct_class(self) -> str:
@@ -167,19 +176,24 @@ class TtsEngine:
         text = (text or "").strip()
         if not text:
             return []
+
         window = self._seg_window()
         if window <= 0:
-            return [text]
+            # 分段关闭：回退到旧 max_text_len 逻辑（按句切 + 超长硬切）
+            return self._legacy_split(text)
 
+        # 新分段逻辑：窗口 = segment_len，max_text_len 不参与，仅作「无标点硬切」兜底
+        hard_cap = self._seg_hard_cap()
         punct = self._seg_punct_class()
         punct_re = re.compile(punct)
         n = len(text)
         chunks: list = []
         start = 0
         while start < n:
+            # 本段上限：优先 segment_len 窗口；若该段无标点，则单段仍不超过 hard_cap（0=不限）
             end = min(start + window, n)
             # 在 [start, end) 窗口内找【最后一个】命中的分段符号：
-            # 取窗口内 30 字范围内最后一个标点，以它前面（含符号）为一段。
+            # 取窗口内字数范围内最后一个标点，以它前面（含符号）为一段。
             last = None
             for m in punct_re.finditer(text, start, end):
                 last = m
@@ -191,11 +205,39 @@ class TtsEngine:
                     chunks.append(seg)
                 start = cut
             else:
-                # 窗口内无命中符号：硬切到窗口末（仍 strip 去除首尾空白/换行）
-                seg = text[start:end].strip()
+                # 窗口内无命中符号：硬切。若配置了 hard_cap(>0) 且窗口超过它，按 hard_cap 切；
+                # 否则直接切到窗口末（仍 strip 去除首尾空白/换行）。
+                cut = min(end, start + hard_cap) if hard_cap > 0 else end
+                seg = text[start:cut].strip()
                 if seg:
                     chunks.append(seg)
-                start = end
+                start = cut
+        return chunks
+
+    def _legacy_split(self, text: str) -> list:
+        """旧分段逻辑（segment_len 关闭时回退）：按句边界切，超 max_text_len 则硬切。"""
+        cap = self._legacy_window()
+        if cap <= 0:
+            return [text]
+        chunks: list = []
+        buf = ""
+        for seg in re.split(r"(?<=[。！？!?\n])", text):
+            seg = seg.strip()
+            if not seg:
+                continue
+            if len(buf) + len(seg) <= cap:
+                buf += seg
+            else:
+                if buf:
+                    chunks.append(buf)
+                if len(seg) > cap:
+                    for i in range(0, len(seg), cap):
+                        chunks.append(seg[i : i + cap])
+                    buf = ""
+                else:
+                    buf = seg
+        if buf:
+            chunks.append(buf)
         return chunks
 
     # ---------- 合成 ----------
