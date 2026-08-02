@@ -24,6 +24,7 @@
 """
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -42,6 +43,11 @@ from cosyvoice.cli.cosyvoice import AutoModel
 from cosyvoice.utils.file_utils import load_wav, logging
 
 app = FastAPI(title="CosyVoice TTS API")
+
+# 推理是同步且耗时的（单句约 4s），且模型非线程安全。
+# 用全局锁让合成请求串行，避免并发请求互相 reset 连接；
+# 同时用线程池把同步推理移出事件循环，保证 / 健康检查随时可响应。
+_SYNTH_LOCK = asyncio.Lock()
 
 cosyvoice = None
 SAMPLE_RATE = 24000
@@ -176,8 +182,11 @@ async def inference_zero_shot(
         logging.warning(f"[zero_shot] 音频解析失败: {e}")
         return Response(str(e), status_code=400)
     logging.info(f"[zero_shot] tts_text={tts_text[:40]}..., prompt_text={prompt_text[:40]}...")
-    gen = cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech, stream=False)
-    pcm = _synthesize(gen)
+    async with _SYNTH_LOCK:
+        gen = await asyncio.to_thread(
+            cosyvoice.inference_zero_shot, tts_text, prompt_text, prompt_speech, False
+        )
+        pcm = await asyncio.to_thread(_synthesize, gen)
     if not pcm:
         return Response("empty audio", status_code=500)
     return Response(content=pcm, media_type="application/octet-stream")
@@ -201,8 +210,11 @@ async def inference_instruct2(
         logging.warning(f"[instruct2] 音频解析失败: {e}")
         return Response(str(e), status_code=400)
     logging.info(f"[instruct2] tts_text={tts_text[:40]}..., instruct_text={instruct_text[:40]}...")
-    gen = cosyvoice.inference_instruct2(tts_text, instruct_text, prompt_speech, stream=False)
-    pcm = _synthesize(gen)
+    async with _SYNTH_LOCK:
+        gen = await asyncio.to_thread(
+            cosyvoice.inference_instruct2, tts_text, instruct_text, prompt_speech, False
+        )
+        pcm = await asyncio.to_thread(_synthesize, gen)
     if not pcm:
         return Response("empty audio", status_code=500)
     return Response(content=pcm, media_type="application/octet-stream")

@@ -14,6 +14,7 @@ AstrBot 单独存入会话历史，因此记忆插件与大模型下一轮都能
 import os
 import re
 import json
+import time
 import random
 
 import astrbot.api.message_components as Comp
@@ -34,6 +35,9 @@ PLUGIN_ID = "astrbot_plugin_cosyvoice"
 
 # 语音服务器连不上时统一给用户的提示（大模型也需要能看懂这是服务器故障）
 SERVER_DOWN_TIP = "🎙️ 语音服务器失联了，可以稍后再试或者联系管理员~（文字照常发送）"
+# 服务端报错后的熔断冷却时长（秒）：冷却期内本插件不再向服务端发请求，只发文字，
+# 避免服务端已坏时每条消息都去打、反复刷 ReadError。冷却到期后再试一次，成功则恢复。
+SERVER_COOLDOWN_SEC = 30.0
 
 
 @register(PLUGIN_ID, "Yours", "接入本地 CosyVoice3，让机器人以可配置音色朗读回复", "1.0.0")
@@ -57,7 +61,10 @@ class CosyVoicePlugin(Star):
         # 本轮用户原始消息（按会话），供「用户要求用文字回复」的抑制判定跨钩子使用，
         # 避免 on_decorating_result 阶段 message_str 已不可用时漏判 text_keywords。
         self._last_user_msg: dict = {}
-        # 语音服务器失联状态：True 时已提示过，避免每条消息重复刷屏；合成成功时复位
+        # 语音服务器熔断（冷却）状态：服务端报错后进入冷却期，冷却期内直接跳过合成、
+        # 只发文字，不再每条消息都去打已经坏掉的服务端（避免刷屏无效请求 / 反复 ReadError）。
+        # _server_cooldown_until 为冷却到期的时间戳（0 表示正常）；_server_down 仅控制提示刷屏。
+        self._server_cooldown_until = 0.0
         self._server_down = False
         # 本轮已合成的文本集合（origin -> {text}），防止 on_decorating_result 被框架
         # 重复触发时重复合成、重复打服务端导致服务端过载 / 误报失联。
@@ -117,6 +124,23 @@ class CosyVoicePlugin(Star):
 
     def _clear(self, event: AstrMessageEvent):
         self._flags.pop(self._key(event), None)
+
+    def _mark_server_ok(self):
+        """合成成功：解除熔断冷却，并复位失联提示标志，便于下次真的失联时再提示。"""
+        self._server_cooldown_until = 0.0
+        self._server_down = False
+
+    def _trip_breaker(self, chain: list):
+        """合成失败：进入熔断冷却，冷却期内本插件不再向服务端发请求（只发文字）。
+
+        首次进入冷却时在当前链追加一条一次性提示，避免每条消息都刷屏。
+        冷却时长见 SERVER_COOLDOWN_SEC。
+        """
+        self._server_cooldown_until = time.time() + SERVER_COOLDOWN_SEC
+        if not self._server_down:
+            self._server_down = True
+            chain.append(Comp.Plain(SERVER_DOWN_TIP))
+
 
     # ---------- 会话级语音开关（按群持久记忆） ----------
     def _load_sessions(self) -> dict:
@@ -359,22 +383,30 @@ class CosyVoicePlugin(Star):
         if any(isinstance(c, Comp.Record) for c in chain):
             return
 
+        # 服务端熔断：若处于冷却期（之前连续报「连不上」），直接跳过合成、只发文字，
+        # 不再每条消息都去打已经坏掉的服务端，避免刷屏无效请求。
+        # 注意：冷却仅由「真正连不上（CosyVoiceServerError）」触发；偶发的连接中途断开
+        # （ReadError/RemoteProtocolError 等 RequestError）不进冷却，下条消息照常重试，
+        # 避免单段失败就把整个会话静音 30 秒（之前的根因 bug）。
+        if self._server_cooldown_until and time.time() < self._server_cooldown_until:
+            return
+
         # 本轮同一条消息若已成功合成过（框架可能重复触发 on_decorating_result），
         # 直接跳过，避免重复打服务端、服务端过载、以及把偶发失败误报成「服务器失联」。
+        # 仅「成功合成过」才登记，失败不登记（天然支持重试，无需 except 兜底 discard）。
         origin = event.unified_msg_origin
         done = self._decorated.get(origin, set())
         if full_text in done:
             return
-        # 标记本轮正在/已处理该文本（先登记，合成成功后再确认；失败不登记以便重试）
-        bucket = self._decorated.setdefault(origin, set())
-        bucket.add(full_text)
-        # 防止集合无限增长：每会话仅保留最近 20 条已合成文本
-        if len(bucket) > 20:
-            self._decorated[origin] = set(list(bucket)[-20:])
 
         voice = self._get_flag(event, "voice", None) or self._session_voice(event)
         send_mode = cfg.get("send_mode", "both")
         merge = bool(cfg.get("segment_merge", False))
+        logger.debug(
+            f"[cosyvoice] 合成参数诊断 origin={origin} segment_len={cfg.get('segment_len', 0)} "
+            f"segment_merge={merge} send_mode={send_mode} merge_path={merge} "
+            f"text_len={len(full_text)}"
+        )
         try:
             if merge:
                 # 合并模式：全部合成完拼成一个音频，仍可塞进发送链（钩子返回后统一发出）
@@ -382,7 +414,6 @@ class CosyVoicePlugin(Star):
                 if not path:
                     logger.warning("[cosyvoice] 合成失败，仅发送文本")
                     return
-                self._server_down = False
                 if send_mode == "voice_only":
                     result.chain = [c for c in chain if not isinstance(c, Comp.Plain)] + [
                         Comp.Record(file=path, url=path)
@@ -391,6 +422,9 @@ class CosyVoicePlugin(Star):
                     chain.append(Comp.Record(file=path, url=path))
                 audio.schedule_cleanup(path)
                 await self._after_voice_sent(event, cfg, full_text, send_mode)
+                # 整轮成功后才登记幂等 + 解除冷却
+                self._mark_server_ok()
+                self._decorated.setdefault(origin, set()).add(full_text)
             else:
                 # 不合并：逐段合成、服务端返回一段就立即发一段（真正的流式发送）。
                 # voice_only 模式下把原文从最终链移除（文字由 LLM completion_text 存入会话历史，不丢），
@@ -400,7 +434,6 @@ class CosyVoicePlugin(Star):
                 sent_any = False
                 async for wav in self.engine.iter_segment_wavs(full_text, voice):
                     sent_any = True
-                    self._server_down = False
                     rec = Comp.Record(file=wav, url=wav)
                     audio.schedule_cleanup(wav)
                     await self._realtime_send(event, [rec])
@@ -409,16 +442,26 @@ class CosyVoicePlugin(Star):
                     return
                 # 流式逐段发完后，补回会话上下文提示（voice_only 下补回文字防失忆）
                 await self._after_voice_sent(event, cfg, full_text, send_mode)
+                # 整轮成功后才登记幂等 + 解除冷却
+                self._mark_server_ok()
+                self._decorated.setdefault(origin, set()).add(full_text)
         except CosyVoiceServerError:
-            # 真正连不上时，移除本轮已登记文本，便于服务端恢复后重试本条消息
-            self._decorated.get(origin, set()).discard(full_text)
+            # 真正连不上：进入熔断冷却，本条跳过（仅发文字）。
             self._clear(event)
-            logger.warning("[cosyvoice] 语音服务器失联，仅发送文本")
-            # 同一聊天内只提示一次，合成成功（服务器恢复）后会复位，避免每条消息刷屏
-            if not self._server_down:
-                self._server_down = True
-                chain.append(Comp.Plain(SERVER_DOWN_TIP))
+            logger.warning("[cosyvoice] 语音服务器失联，进入冷却，仅发送文本")
+            self._trip_breaker(chain)
             return
+        except Exception as e:
+            # 其它合成异常（含服务端连接中途断开的通用 RequestError / ReadError）：
+            # 仅记录并跳过本条（仅发文字），【不进入冷却、不追加失联提示】，
+            # 下条消息照常重试。失败不登记幂等，故本条后续可重试。
+            self._clear(event)
+            logger.warning(f"[cosyvoice] 语音合成失败（本条跳过，下条重试）: {e}")
+            return
+        # 防止幂等集合无限增长：每会话仅保留最近 20 条已合成文本
+        bucket = self._decorated.get(origin)
+        if bucket and len(bucket) > 20:
+            self._decorated[origin] = set(list(bucket)[-20:])
         self._clear(event)
 
     # ---------- 用户指令：/tts <文本> ----------
@@ -430,6 +473,11 @@ class CosyVoicePlugin(Star):
         text = re.sub(r"^[/\s@]*tts\b\s*", "", raw, flags=re.IGNORECASE).strip()
         if not text:
             yield event.plain_result("试试这样：/tts 后面跟上你想让我念的话～")
+            return
+
+        # 服务端熔断冷却期内，直接提示，不再去打已坏的服务端
+        if self._server_cooldown_until and time.time() < self._server_cooldown_until:
+            yield event.plain_result(SERVER_DOWN_TIP)
             return
 
         self._set_flag(event, "suppress", True)
@@ -458,7 +506,13 @@ class CosyVoicePlugin(Star):
                 if not sent:
                     yield event.plain_result("哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？")
         except CosyVoiceServerError:
+            self._trip_breaker([])
             yield event.plain_result(SERVER_DOWN_TIP)
+            return
+        except Exception as e:
+            # 偶发错误（如连接中途断开）不进熔断，仅提示本条失败，可重试
+            logger.warning(f"[cosyvoice] /tts 合成失败（本条跳过）: {e}")
+            yield event.plain_result("哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？")
             return
 
     # ---------- 用户指令：/tts_voice <音色名> ----------
@@ -613,6 +667,11 @@ class CosyVoicePlugin(Star):
             yield event.plain_result("语音功能还没开呢，先把它打开我就能念啦～")
             return
 
+        # 服务端熔断冷却期内，直接提示，不再去打已坏的服务端
+        if self._server_cooldown_until and time.time() < self._server_cooldown_until:
+            yield event.plain_result(SERVER_DOWN_TIP)
+            return
+
         self._set_flag(event, "suppress", True)
         if voice:
             self._set_flag(event, "voice", voice)
@@ -652,7 +711,13 @@ class CosyVoicePlugin(Star):
                 if not sent:
                     yield event.plain_result("话到嘴边卡壳了，这次没念出来，待会儿再试试？")
         except CosyVoiceServerError:
+            self._trip_breaker([])
             yield event.plain_result(SERVER_DOWN_TIP)
+            return
+        except Exception as e:
+            # 偶发错误（如连接中途断开）不进熔断，仅提示本条失败，可重试
+            logger.warning(f"[cosyvoice] text_to_speech 合成失败（本条跳过）: {e}")
+            yield event.plain_result("话到嘴边卡壳了，这次没念出来，待会儿再试试？")
             return
 
     # ---------- LLM 工具：自然语言开关当前会话语音模式 ----------
@@ -714,3 +779,4 @@ class CosyVoicePlugin(Star):
 
     async def terminate(self):
         self._flags.clear()
+        await self.client.close()
