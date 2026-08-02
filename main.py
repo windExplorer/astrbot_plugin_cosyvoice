@@ -402,10 +402,15 @@ class CosyVoicePlugin(Star):
         voice = self._get_flag(event, "voice", None) or self._session_voice(event)
         send_mode = cfg.get("send_mode", "both")
         merge = bool(cfg.get("segment_merge", False))
-        logger.debug(
-            f"[cosyvoice] 合成参数诊断 origin={origin} segment_len={cfg.get('segment_len', 0)} "
-            f"segment_merge={merge} send_mode={send_mode} merge_path={merge} "
-            f"text_len={len(full_text)}"
+        voice_name, _, _ = self.engine.resolve_voice(voice)
+        chunks = self.engine.split_text(full_text)
+        logger.info(
+            f"[cosyvoice] 准备合成语音 | 音色={voice_name} 总长度={len(full_text)}字 "
+            f"分段数={len(chunks)} 模式={'合并' if merge else '逐段发送'} "
+            f"send_mode={send_mode}"
+        )
+        logger.info(
+            f"[cosyvoice] 全文预览(前80字): {full_text[:80]}{'...' if len(full_text)>80 else ''}"
         )
         try:
             if merge:
@@ -425,6 +430,7 @@ class CosyVoicePlugin(Star):
                 # 整轮成功后才登记幂等 + 解除冷却
                 self._mark_server_ok()
                 self._decorated.setdefault(origin, set()).add(full_text)
+                logger.info("[cosyvoice] 合并合成完成，语音已追加到结果链")
             else:
                 # 不合并：逐段合成、服务端返回一段就立即发一段（真正的流式发送）。
                 # voice_only 模式下把原文从最终链移除（文字由 LLM completion_text 存入会话历史，不丢），

@@ -3,6 +3,7 @@
 import os
 import re
 import json
+import time
 
 from astrbot.api import logger
 
@@ -311,13 +312,22 @@ class TtsEngine:
         try:
             pcms = []
             kwargs = self._wav_kwargs(prompt_wav, prompt_text)
-            for ch in chunks:
+            total = len(chunks)
+            for i, ch in enumerate(chunks, 1):
+                t0 = time.time()
+                logger.info(
+                    f"[cosyvoice] 合成 {i}/{total}: \"{ch[:40]}{'...' if len(ch)>40 else ''}\""
+                )
                 pcm = await self.client.synthesize(ch, mode="zero_shot", **kwargs)
                 if pcm:
+                    dt = (time.time() - t0) * 1000
+                    logger.info(f"[cosyvoice] 合成 {i}/{total} OK | {dt:.0f}ms {len(pcm)}字节PCM")
                     pcms.append(pcm)
             if not pcms:
+                logger.warning("[cosyvoice] 合并合成完成：0 段成功，无有效音频")
                 return None
             combined = b"".join(pcms)
+            logger.info(f"[cosyvoice] 合并合成完成：{len(pcms)}/{total} 段成功，总PCM {len(combined)}字节")
             return audio.pcm_to_wav_file(combined, self.client.sample_rate, self.client.cache_dir)
         except CosyVoiceServerError:
             # 服务器失联是「环境故障」而非「内容问题」，向上抛给调用方给出专门提示
@@ -344,8 +354,13 @@ class TtsEngine:
             logger.debug("[cosyvoice] 无有效可合成文本，跳过语音合成")
             return
         kwargs = self._wav_kwargs(prompt_wav, prompt_text)
-        for ch in chunks:
+        total = len(chunks)
+        for i, ch in enumerate(chunks, 1):
             try:
+                t0 = time.time()
+                logger.info(
+                    f"[cosyvoice] 合成 {i}/{total}: \"{ch[:40]}{'...' if len(ch)>40 else ''}\""
+                )
                 pcm = await self.client.synthesize(ch, mode="zero_shot", **kwargs)
             except CosyVoiceServerError:
                 raise
@@ -353,4 +368,6 @@ class TtsEngine:
                 logger.error(f"[cosyvoice] 单段合成失败已跳过: {e}")
                 continue
             if pcm:
+                dt = (time.time() - t0) * 1000
+                logger.info(f"[cosyvoice] 合成 {i}/{total} OK | {dt:.0f}ms {len(pcm)}字节PCM")
                 yield audio.pcm_to_wav_file(pcm, self.client.sample_rate, self.client.cache_dir)
