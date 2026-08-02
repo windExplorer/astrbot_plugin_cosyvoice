@@ -93,7 +93,11 @@ class TtsEngine:
         - 旧式 dict：{ 音色名: {prompt_wav, prompt_text} }；
         - 历史 text 类型的 JSON 字符串（兼容旧配置）。
         """
-        self.voices = self._norm_voices(voices)
+        new = self._norm_voices(voices)
+        # 内容未变化则跳过重建与日志，避免 on_decorating_result 每次触发都重打「已加载 N 个音色」
+        if new == self.voices:
+            return
+        self.voices = new
         if not self.voices and voices:
             logger.warning(
                 f"[cosyvoice] 已读到 voices 配置但解析出 0 个音色，"

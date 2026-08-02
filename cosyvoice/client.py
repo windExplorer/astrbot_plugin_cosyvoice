@@ -157,8 +157,13 @@ class CosyVoiceClient:
             )
             raise
         except httpx.RequestError as e:
-            logger.error(f"[cosyvoice] 请求 CosyVoice 服务出错 {url}: {e}")
-            raise CosyVoiceServerError(f"无法连接语音服务器 {url}: {e}") from e
+            # 连接中途被服务端断开（如服务端连续合成时进程抖动 / RemoteProtocolError）：
+            # 这类错误服务其实是「可达」的，不应误报为「无法连接 / 服务器失联」。
+            # 仅记录 INFO 并抛出原始异常，交由上层按非 CosyVoiceServerError 处理，
+            # 避免错误地提示用户「语音服务器失联」（实际可能是本次请求偶发失败）。
+            msg = str(e).strip()
+            logger.warning(f"[cosyvoice] 请求 CosyVoice 服务中断（服务可达但本次失败）{url}: {msg or type(e).__name__}")
+            raise
         finally:
             if files:
                 files["prompt_wav"][1].close()

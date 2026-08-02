@@ -2,6 +2,13 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v1.4.4 (2026-08-02)
+
+- 修复「卡半天报语音服务器失联、但语音最终却送达」的问题：根因是 AstrBot 框架对同一条消息重复触发 `on_decorating_result`，导致重复合成、给 CosyVoice 服务端加压，第二次请求在传输中途被服务端断开（httpx 通用 RequestError，错误信息为空），被误报为「服务器失联」。
+  - 新增 per-message 合成幂等锁：同一会话同一条文本只合成一次，第二次触发直接跳过，不再重复打服务端。
+  - `cosyvoice/client.py`：连接中途断开（服务实际可达）不再转 `CosyVoiceServerError`、不再误提示「服务器失联」，仅记 WARNING；真正的连接失败（ConnectError/ConnectTimeout）仍正常提示。
+  - `update_voices`：音色配置内容未变时跳过重建与「已加载 N 个音色」日志，消除重复触发的日志噪音。
+
 ## v1.4.3 (2026-08-02)
 
 - 修复「无法连接 CosyVoice 服务」误报：原 `timeout=60` 为 httpx 标量超时，同时约束连接与读取，导致服务端在线但推理耗时 > 60s 时被 `ReadTimeout` 误判为连接失败。改为细粒度超时（`httpx.Timeout(timeout, connect=10.0)`），连接 10s 快速失败、读取用配置超时；并区分 `ConnectError`/`ConnectTimeout`（真连不上）与 `ReadTimeout`（服务在线但推理慢），日志不再误导。

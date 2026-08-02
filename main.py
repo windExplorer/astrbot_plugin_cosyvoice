@@ -59,6 +59,9 @@ class CosyVoicePlugin(Star):
         self._last_user_msg: dict = {}
         # 语音服务器失联状态：True 时已提示过，避免每条消息重复刷屏；合成成功时复位
         self._server_down = False
+        # 本轮已合成的文本集合（origin -> {text}），防止 on_decorating_result 被框架
+        # 重复触发时重复合成、重复打服务端导致服务端过载 / 误报失联。
+        self._decorated: dict = {}
         # 会话级语音开关（按群持久记忆）：unified_msg_origin -> True
         data_dir = self._data_dir()
         self._session_file = os.path.join(data_dir, "tts_sessions.json")
@@ -356,6 +359,19 @@ class CosyVoicePlugin(Star):
         if any(isinstance(c, Comp.Record) for c in chain):
             return
 
+        # 本轮同一条消息若已成功合成过（框架可能重复触发 on_decorating_result），
+        # 直接跳过，避免重复打服务端、服务端过载、以及把偶发失败误报成「服务器失联」。
+        origin = event.unified_msg_origin
+        done = self._decorated.get(origin, set())
+        if full_text in done:
+            return
+        # 标记本轮正在/已处理该文本（先登记，合成成功后再确认；失败不登记以便重试）
+        bucket = self._decorated.setdefault(origin, set())
+        bucket.add(full_text)
+        # 防止集合无限增长：每会话仅保留最近 20 条已合成文本
+        if len(bucket) > 20:
+            self._decorated[origin] = set(list(bucket)[-20:])
+
         voice = self._get_flag(event, "voice", None) or self._session_voice(event)
         send_mode = cfg.get("send_mode", "both")
         merge = bool(cfg.get("segment_merge", False))
@@ -394,6 +410,8 @@ class CosyVoicePlugin(Star):
                 # 流式逐段发完后，补回会话上下文提示（voice_only 下补回文字防失忆）
                 await self._after_voice_sent(event, cfg, full_text, send_mode)
         except CosyVoiceServerError:
+            # 真正连不上时，移除本轮已登记文本，便于服务端恢复后重试本条消息
+            self._decorated.get(origin, set()).discard(full_text)
             self._clear(event)
             logger.warning("[cosyvoice] 语音服务器失联，仅发送文本")
             # 同一聊天内只提示一次，合成成功（服务器恢复）后会复位，避免每条消息刷屏
