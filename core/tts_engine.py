@@ -157,14 +157,45 @@ class TtsEngine:
         return None, None, None
 
     # ---------- 长文本分片 ----------
-    def _seg_window(self) -> int:
-        """分段字数窗口（仅由 segment_len 决定，与 max_text_len 解耦）。
+    @staticmethod
+    def _parse_len_range(raw, default_max: int = 0) -> tuple:
+        """把分段字数配置解析为 (min, max) 区间。
 
-        - segment_len > 0：按用户配置的分段字数（配合 segment_punct 在窗口内命中标点处切），
-          窗口就是 segment_len 本身，不受 max_text_len 影响。
-        - segment_len <= 0（关闭分段）：返回 0，由调用方回退到旧 max_text_len 逻辑。
+        - ``"30,50"`` → (30, 50)
+        - ``"50"`` / ``50`` → (0, 50)：只设最大，最小为 0（不强制合并短段）
+        - ``0`` / 空 / 非法 → (0, 0)：关闭分段
+        min 同时作为「短段合并下限」：切出的段若 < min 字，会并入相邻段。
         """
-        return int(self.config.get("segment_len", 0) or 0)
+        if raw is None:
+            return (0, default_max)
+        s = str(raw).strip()
+        if not s:
+            return (0, 0)
+        parts = re.split(r"[\s,，]+", s)
+        nums = []
+        for p in parts:
+            p = p.strip()
+            if p and p.replace(".", "", 1).isdigit():
+                nums.append(int(float(p)))
+            if len(nums) >= 2:
+                break
+        if not nums:
+            return (0, 0)
+        if len(nums) == 1:
+            return (0, nums[0])
+        lo, hi = nums[0], nums[1]
+        if lo > hi:
+            lo, hi = hi, lo
+        return (lo, hi)
+
+    def _seg_window(self) -> tuple:
+        """分段字数区间 (min, max)，由 segment_len 决定，与 max_text_len 解耦。
+
+        - max > 0：窗口上界 = max，在 [start, start+max) 内命中的最后一个分段符号处切；
+          min > 0 时作为短段合并下限。
+        - max <= 0（关闭分段）：返回 (0, 0)，由调用方回退到旧 max_text_len 逻辑。
+        """
+        return self._parse_len_range(self.config.get("segment_len", 0), 0)
 
     def _seg_hard_cap(self) -> int:
         """单段绝对硬上限（仅作用于「窗口内无命中符号时的硬切」）。
@@ -176,15 +207,15 @@ class TtsEngine:
         return int(self.config.get("max_text_len", 0) or 0)
 
     def _legacy_window(self) -> int:
-        """旧分段逻辑窗口：仅在 segment_len 关闭（<=0）时生效，沿用 max_text_len。"""
+        """旧分段逻辑窗口：仅在 segment_len 关闭（max<=0）时生效，沿用 max_text_len。"""
         return int(self.config.get("max_text_len", 0) or 0)
 
-    def _seg_first_window(self) -> int:
-        """首段字数窗口：segment_first_len > 0 时用它，否则回退到普通 segment_len。"""
-        first = int(self.config.get("segment_first_len", 0) or 0)
-        if first > 0:
-            return first
-        return self._seg_window()
+    def _seg_first_window(self) -> tuple:
+        """首段字数区间 (min, max)：segment_first_len 配置了用它的，否则回退到普通 segment_len。"""
+        raw = self.config.get("segment_first_len", 0) or 0
+        if not str(raw).strip() or str(raw).strip() == "0":
+            return self._seg_window()
+        return self._parse_len_range(raw, 0)
 
     def _seg_nopunct_mode(self, which: str) -> str:
         """无标点时的处理模式：
@@ -212,60 +243,93 @@ class TtsEngine:
         if not text:
             return []
 
-        window = self._seg_window()
-        if window <= 0:
+        lo, hi = self._seg_window()
+        if hi <= 0:
             # 分段关闭：回退到旧 max_text_len 逻辑（按句切 + 超长硬切）
-            return self._legacy_split(text)
-
-        # 新分段逻辑：窗口 = segment_len，首段可用独立的 segment_first_len。
-        # max_text_len 不参与窗口，仅作 truncate 模式下「无标点硬切」的兜底上限。
-        hard_cap = self._seg_hard_cap()
-        punct = self._seg_punct_class()
-        punct_re = re.compile(punct)
-        n = len(text)
-        chunks: list = []
-        start = 0
-        is_first = True
-        while start < n:
-            w = self._seg_first_window() if is_first else window
-            end = min(start + w, n)
-            # 在 [start, end) 窗口内找【最后一个】命中的分段符号：
-            # 取窗口内字数范围内最后一个标点，以它前面（含符号）为一段。
-            last = None
-            for m in punct_re.finditer(text, start, end):
-                last = m
-            if last is not None:
-                cut = last.end()
-                seg = text[start:cut].strip()
-                if seg:
-                    chunks.append(seg)
-                start = cut
-            else:
-                mode = self._seg_nopunct_mode("first" if is_first else "body")
-                if mode == "seek":
-                    # 窗口内无标点：往后（超出窗口）找第一个命中的分段符号
-                    nxt = punct_re.search(text, end)
-                    if nxt is not None:
-                        cut = nxt.end()
-                        seg = text[start:cut].strip()
-                        if seg:
-                            chunks.append(seg)
-                        start = cut
-                    else:
-                        # 到结尾都无标点：剩余整段作为一段
-                        seg = text[start:n].strip()
-                        if seg:
-                            chunks.append(seg)
-                        start = n
-                else:
-                    # truncate：窗口内无标点，直接在窗口末（受 hard_cap 兜底）硬切
-                    cut = min(end, start + hard_cap) if hard_cap > 0 else end
+            chunks = self._legacy_split(text)
+        else:
+            # 新分段逻辑：窗口上界 = hi，首段可用独立的 segment_first_len 区间。
+            # 在 [start, start+hi) 内命中的最后一个分段符号处切；min(lo) 作为短段合并下限。
+            # max_text_len 不参与窗口，仅作 truncate 模式下「无标点硬切」的兜底上限。
+            hard_cap = self._seg_hard_cap()
+            punct = self._seg_punct_class()
+            punct_re = re.compile(punct)
+            n = len(text)
+            chunks: list = []
+            start = 0
+            is_first = True
+            while start < n:
+                fw_lo, fw_hi = (self._seg_first_window() if is_first else (lo, hi))
+                end = min(start + fw_hi, n)
+                # 在 [start, end) 窗口内找【最后一个】命中的分段符号：
+                # 取窗口内字数范围内最后一个标点，以它前面（含符号）为一段。
+                last = None
+                for m in punct_re.finditer(text, start, end):
+                    last = m
+                if last is not None:
+                    cut = last.end()
                     seg = text[start:cut].strip()
                     if seg:
                         chunks.append(seg)
                     start = cut
-            is_first = False
-        return chunks
+                else:
+                    mode = self._seg_nopunct_mode("first" if is_first else "body")
+                    if mode == "seek":
+                        # 窗口内无标点：往后（超出窗口）找第一个命中的分段符号
+                        nxt = punct_re.search(text, end)
+                        if nxt is not None:
+                            cut = nxt.end()
+                            seg = text[start:cut].strip()
+                            if seg:
+                                chunks.append(seg)
+                            start = cut
+                        else:
+                            # 到结尾都无标点：剩余整段作为一段
+                            seg = text[start:n].strip()
+                            if seg:
+                                chunks.append(seg)
+                            start = n
+                    else:
+                        # truncate：窗口内无标点，直接在窗口末（受 hard_cap 兜底）硬切
+                        cut = min(end, start + hard_cap) if hard_cap > 0 else end
+                        seg = text[start:cut].strip()
+                        if seg:
+                            chunks.append(seg)
+                        start = cut
+                is_first = False
+
+        # 短段合并：任何 < lo 字的段并入相邻段（优先并入前一段，首段并入后一段）。
+        # lo=0 时退化为不合并（保持原分段）。同时剔除空段。
+        return self._merge_short(chunks, lo)
+
+    @staticmethod
+    def _merge_short(chunks: list, min_len: int) -> list:
+        """把 < min_len 字的短段并入相邻段，避免「哈哈。」这类超短句单独成段。"""
+        if min_len <= 0:
+            return [c for c in chunks if c]
+        out: list = []
+        for c in chunks:
+            c = (c or "").strip()
+            if not c:
+                continue
+            if not out:
+                # 首段：若太短则暂存，等待并入下一段（无论下一段长短）
+                if len(c) < min_len:
+                    out.append(c)
+                else:
+                    out.append(c)
+            else:
+                prev = out[-1]
+                if len(prev) < min_len or len(c) < min_len:
+                    # 前一段或本段偏短：合并，避免「哈哈。」这类孤立短段
+                    out[-1] = prev + c
+                else:
+                    out.append(c)
+        # 若末段仍短于 min_len（后面没段可并），并入前一段
+        if len(out) >= 2 and len(out[-1]) < min_len:
+            out[-2] = out[-2] + out[-1]
+            out.pop()
+        return out
 
     def _legacy_split(self, text: str) -> list:
         """旧分段逻辑（segment_len 关闭时回退）：按句边界切，超 max_text_len 则硬切。"""

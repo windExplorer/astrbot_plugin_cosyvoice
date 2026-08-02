@@ -154,18 +154,18 @@
     "default": 200
   },
   "segment_len": {
-    "type": "int",
-    "title": "分段回复字数",
-    "description": "每段（首段除外）的字数窗口，配合分段符号切分，用于长文逐段快速合成",
-    "hint": "0=关闭分段（回退到 max_text_len 旧逻辑）；>0 时每段取前 N 字范围内最后一个命中的分段符号，以它前面（含符号）为一段。窗口内无标点时的处理见 segment_nopunct。与 max_text_len 互相独立。",
-    "default": 0
+    "type": "string",
+    "title": "分段回复字数（最小,最大）",
+    "description": "每段（首段除外）的字数区间，配合分段符号切分，用于长文逐段快速合成",
+    "hint": "格式「最小,最大」(如 30,50)：在 最大 字范围内取最后一个命中的分段符号切分；无标点时按 segment_nopunct 处理(硬切到最大 或 往后找)。最小 同时是短段合并下限——切出的段若短于它(如「哈哈。」)会自动并入相邻段，避免超短句单独成段。只填一个数字(如 50)表示只设最大、不强制合并。0/留空=关闭分段(回退旧逻辑)。与 max_text_len 互相独立。",
+    "default": "0"
   },
   "segment_first_len": {
-    "type": "int",
-    "title": "首段字数",
-    "description": "首段独立的字数窗口（区别于后续每段）",
-    "hint": "0=首段使用「分段回复字数(segment_len)」；>0 时首段单独取前 N 字范围内最后一个命中的分段符号切分（让首段更快出声）。首段无标点的处理见 segment_first_nopunct。",
-    "default": 0
+    "type": "string",
+    "title": "首段字数（最小,最大）",
+    "description": "首段独立的字数区间（区别于后续每段）",
+    "hint": "格式「最小,最大」(如 15,30)：首段单独按此区间切分(让首段更快出声)，语义同 segment_len。0/留空=首段沿用 segment_len 的区间。首段无标点的处理见 segment_first_nopunct。",
+    "default": "0"
   },
   "segment_punct": {
     "type": "string",
