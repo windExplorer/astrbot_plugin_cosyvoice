@@ -60,17 +60,28 @@ class TtsEngine:
         return prompt_wav
 
     def _wav_kwargs(self, prompt_wav: str, prompt_text: str) -> dict:
-        """根据配置决定参考音频的传递方式：
+        """根据配置决定参考音频与参考文本的传递方式。
 
         - 配置了 server_voices_dir 且本地找不到该文件 → 走服务端本地路径（prompt_wav_path），
           不占用带宽上传大文件；
         - 否则 → 走 AstrBot 服务端本地文件上传（prompt_wav）。
+
+        参考文本约束（严格分离，防止 prompt_text 被污染）：
+        - prompt_text 仅来自 voices.<音色>.prompt_text（由 resolve_voice 提供），
+          与 LLM system prompt / 对话历史 / 角色设定完全隔离，绝不拼接。
+        - prompt_text 非空时才作为表单字段发送；为空则【完全不带该字段】，
+          交由服务端从 voices.json 按文件名自动取（避免空串被服务端当「缺失」处理时的歧义）。
         """
         server_dir = (self.config.get("server_voices_dir") or "").strip()
+        # 仅当参考文本确实非空才传递，否则让服务端回退到 voices.json
+        pt = (prompt_text or "").strip()
+        base = {}
+        if pt:
+            base["prompt_text"] = pt
         if server_dir and prompt_wav and not os.path.exists(self.resolve_wav(prompt_wav)):
             # 仅在 CosyVoice 服务端放好的参考音频：只传文件名，服务端自己读
-            return {"prompt_wav_path": prompt_wav, "prompt_text": prompt_text}
-        return {"prompt_wav": self.resolve_wav(prompt_wav), "prompt_text": prompt_text}
+            return {"prompt_wav_path": prompt_wav, **base}
+        return {"prompt_wav": self.resolve_wav(prompt_wav), **base}
 
     # ---------- 音色解析 ----------
     def update_voices(self, voices):
