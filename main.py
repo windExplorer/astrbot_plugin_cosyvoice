@@ -268,21 +268,33 @@ class CosyVoicePlugin(Star):
         return recs
 
     async def _realtime_send(self, event: AstrMessageEvent, records: list):
-        """实时发送一段语音：优先用 event.send 主动推送一条独立消息（服务端返回一段即发一段）；
-        若当前 AstrBot 版本的 event 不支持 send（无该方法），则回退把 Record 追加到结果链，
-        由钩子返回后统一发出（多数平台仍会顺序播放多个语音）。
+        """后台补发一段语音：优先主动推送一条独立消息，让语音不依赖结果链、不被阻塞。
+
+        发送顺序（取第一个可用且成功的）：
+        1) event.send：部分平台/版本支持的事件级主动发送；
+        2) self.context.send_message(unified_msg_origin, chain)：AstrBot 官方主动消息 API，
+           通用性最好，但「某些平台可能不支持主动消息发送」。
+
+        不再回退到 result.chain.extend：本插件语音在后台任务中发送，此时 on_decorating_result
+        早已 return、结果链已被 AstrBot 发出，extend 是无效操作且会静默丢语音；故不可用时
+        直接记 WARNING，由调用方决定是否影响（voice_only 下文字已由 LLM 历史兜底，不丢上下文）。
         """
+        chain = event.chain_result(records)
         send = getattr(event, "send", None)
         if callable(send):
             try:
-                await send(event.chain_result(records))
+                await send(chain)
                 return
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"[cosyvoice] event.send 实时发送失败，回退追加到链: {e}")
-        # 回退：直接 append，交给 on_decorating_result 的 result.chain 统一发送
-        result = getattr(event, "result", None)
-        if result is not None and hasattr(result, "chain"):
-            result.chain.extend(records)
+                logger.warning(f"[cosyvoice] event.send 实时发送失败，尝试 context.send_message: {e}")
+        try:
+            await self.context.send_message(event.unified_msg_origin, chain)
+            return
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[cosyvoice] 语音后台补发失败（平台可能不支持主动消息）: {e}"
+                f" | unified_msg_origin={event.unified_msg_origin}"
+            )
 
     # ---------- LLM 回复钩子：标记 + 关键词触发 ----------
     @filter.on_llm_response()
