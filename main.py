@@ -425,6 +425,8 @@ class CosyVoicePlugin(Star):
 
         合成成功后主动 event.send 逐段/整段语音；失败仅记日志，不影响已发出的文字。
         结果链在钩子返回后已由 AstrBot 发送，此处不再改动结果链（避免无效写入）。
+        voice_only 模式下文字已从结果链移除，若语音彻底失败，退化为补发文字，
+        避免前端静默（文字仍由 LLM 历史兜底，这里只是确保用户看得到）。
         """
         cfg = self.config
         try:
@@ -432,6 +434,7 @@ class CosyVoicePlugin(Star):
                 path = await self.engine.synthesize(full_text, voice)
                 if not path:
                     logger.warning("[cosyvoice] 后台合成失败，仅发送文本")
+                    await self._fallback_text(event, full_text, send_mode)
                     return
                 audio.schedule_cleanup(path)
                 await self._realtime_send(event, [Comp.Record(file=path, url=path)])
@@ -444,6 +447,7 @@ class CosyVoicePlugin(Star):
                     await self._realtime_send(event, [rec])
                 if not sent_any:
                     logger.warning("[cosyvoice] 后台合成失败，仅发送文本")
+                    await self._fallback_text(event, full_text, send_mode)
                     return
             # 整轮成功后才登记幂等 + 解除冷却
             self._mark_server_ok()
@@ -455,8 +459,30 @@ class CosyVoicePlugin(Star):
         except CosyVoiceServerError:
             logger.warning("[cosyvoice] 语音服务器失联，进入冷却，仅发送文本")
             self._trip_breaker([])
+            await self._fallback_text(event, full_text, send_mode)
         except Exception as e:
             logger.warning(f"[cosyvoice] 后台语音合成失败（本条跳过，下条重试）: {e}")
+            await self._fallback_text(event, full_text, send_mode)
+
+    async def _fallback_text(self, event: AstrMessageEvent, full_text: str, send_mode: str):
+        """语音彻底失败时，把文字补发回去，避免 voice_only 模式前端静默。
+
+        - both 模式：文字已在结果链由 AstrBot 正常发出，无需补发，直接返回。
+        - voice_only 模式：文字已从结果链移除，若语音失败则需主动把文字发出来，
+          让用户至少看得到（文字也由 LLM completion_text 存入会话历史，不丢上下文）。
+        使用 context.send_message（官方主动消息 API），你平台已确认支持。
+        """
+        if send_mode != "voice_only":
+            return
+        if not full_text:
+            return
+        try:
+            await self.context.send_message(
+                event.unified_msg_origin, event.chain_result([Comp.Plain(full_text)])
+            )
+            logger.info("[cosyvoice] voice_only 语音失败，已退化为补发文字")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[cosyvoice] voice_only 失败兜底补发文字也失败: {e}")
 
     # ---------- 用户指令：/tts <文本> ----------
     @filter.command("tts")
