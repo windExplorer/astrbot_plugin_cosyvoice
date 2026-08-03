@@ -35,7 +35,7 @@ from .utils import audio
 PLUGIN_ID = "astrbot_plugin_cosyvoice"
 
 # 语音服务器连不上时统一给用户的提示（大模型也需要能看懂这是服务器故障）
-SERVER_DOWN_TIP = "🎙️ 语音服务器失联了，可以稍后再试或者联系管理员~（文字照常发送）"
+SERVER_DOWN_TIP = "\n\n🎙️（语音服务器失联了，可以稍后再试或联系管理员，文字照常发送）"
 # 服务端报错后的熔断冷却时长（秒）：冷却期内本插件不再向服务端发请求，只发文字，
 # 避免服务端已坏时每条消息都去打、反复刷 ReadError。冷却到期后再试一次，成功则恢复。
 SERVER_COOLDOWN_SEC = 30.0
