@@ -7,6 +7,7 @@
 """
 
 import os
+import asyncio
 
 import httpx
 
@@ -64,16 +65,20 @@ class CosyVoiceClient:
         self,
         base_url: str,
         sample_rate: int = 24000,
-        timeout: int = 60,
+        timeout: int = 150,
         cache_dir: str = "",
+        max_retry: int = 3,
     ):
         self.base_url = base_url.rstrip("/")
         self.sample_rate = sample_rate
         # timeout 仅约束「读取」（推理耗时），连接保持较短以便真正连不上时快速失败。
-        # 服务端已串行化推理（全局锁），单句约 4s，30s 足够；过长会让失败请求挂很久。
+        # 注意：队列版服务端（cosyvoice_api_queue.py）单次推理可能 >30s，且入队等待
+        # 最长 30s，故客户端读超时不能压成 30s 上限（否则服务端还在排队/推理，客户端
+        # 已 ReadTimeout 断连，自己制造雪崩）。直接用配置的 timeout（默认 150s，
+        # 略大于服务端 INFER_TIMEOUT+入队等待）。
         self.timeout = timeout
-        self._http_timeout = httpx.Timeout(min(timeout, 30), connect=10.0)
-        self._max_retry = 1  # 对「服务可达但本次连接中断」的偶发错误重试一次
+        self._http_timeout = httpx.Timeout(timeout, connect=10.0)
+        self._max_retry = max_retry  # 对「服务可达但本次失败/繁忙」的退避重试次数
         self.cache_dir = cache_dir
         self._sr_fetched = False
         # 复用单一 httpx 客户端（含连接池）：避免每次请求创建/销毁 AsyncClient。
@@ -159,34 +164,55 @@ class CosyVoiceClient:
                 logger.error(f"[cosyvoice] 连接 CosyVoice 服务超时 {url}（服务未启动或地址不可达）: {e}")
                 raise CosyVoiceServerError(f"无法连接语音服务器 {url}: {e}") from e
             except httpx.ReadTimeout as e:
-                # 读取超时：服务在线但本次推理过慢。仅记录，按偶发错误处理（不熔断）。
+                # 读取超时：服务在线但本次推理/排队过慢。按偶发错误处理（不熔断），退避重试。
                 last_err = e
                 logger.warning(
-                    f"[cosyvoice] 合成读取超时（第 {attempt + 1} 次，服务在线但耗时超过 {self.timeout}s）"
-                    f" {url}: {e}"
+                    f"[cosyvoice] 合成读取超时（第 {attempt + 1}/{self._max_retry + 1} 次，"
+                    f"服务在线但耗时超过 {self.timeout}s） {url}: {e}"
                 )
                 if attempt < self._max_retry:
+                    await asyncio.sleep(self._backoff(attempt))
                     continue
                 raise
             except httpx.RequestError as e:
                 # 连接中途被服务端断开（RemoteProtocolError / ReadError 等）：
-                # 服务其实是「可达」的，不应误报「服务器失联」，按偶发错误重试一次后抛出。
+                # 服务其实是「可达」的，不应误报「服务器失联」，按偶发错误退避重试后抛出。
                 last_err = e
                 msg = str(e).strip()
                 logger.warning(
-                    f"[cosyvoice] 请求 CosyVoice 服务中断（第 {attempt + 1} 次，服务可达但本次失败）"
-                    f" {url}: {msg or type(e).__name__}"
+                    f"[cosyvoice] 请求 CosyVoice 服务中断（第 {attempt + 1}/{self._max_retry + 1} 次，"
+                    f"服务可达但本次失败） {url}: {msg or type(e).__name__}"
                 )
                 if attempt < self._max_retry:
+                    await asyncio.sleep(self._backoff(attempt))
                     continue
                 raise
-            try:
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                logger.error(f"[cosyvoice] 合成失败 HTTP {e.response.status_code}: {e.response.text[:500]}")
-                raise
-            pcm = resp.content
-            break
+            # HTTP 状态码：区分「可重试」与「致命」。
+            code = resp.status_code
+            if 200 <= code < 300:
+                pcm = resp.content
+                break
+            # 队列版新增语义：429 队满/入队超时、503 模型未加载、504 推理超时
+            # —— 这些都应退避重试，而不是丢弃（否则高峰期直接丢语音）。
+            if code in (429, 503, 504):
+                last_err = httpx.HTTPStatusError(
+                    f"服务端返回 {code}", request=resp.request, response=resp
+                )
+                logger.warning(
+                    f"[cosyvoice] 合成被服务端拒绝（第 {attempt + 1}/{self._max_retry + 1} 次）"
+                    f" HTTP {code}: {resp.text[:200]} -> 退避重试"
+                )
+                if attempt < self._max_retry:
+                    await asyncio.sleep(self._backoff(attempt))
+                    continue
+                raise httpx.HTTPStatusError(
+                    f"合成失败 HTTP {code}", request=resp.request, response=resp
+                )
+            # 其它状态码（400 参数错误 / 500 服务端生成失败等）：不可重试，直接抛。
+            logger.error(f"[cosyvoice] 合成失败 HTTP {code}: {resp.text[:500]}")
+            raise httpx.HTTPStatusError(
+                f"合成失败 HTTP {code}", request=resp.request, response=resp
+            )
 
         if not pcm:
             # 重试耗尽（上面 break 未命中）：抛出最后一次错误
@@ -194,10 +220,15 @@ class CosyVoiceClient:
                 raise last_err
             raise RuntimeError("[cosyvoice] 合成失败（未知错误）")
 
-        if not pcm:
-            raise RuntimeError("[cosyvoice] 服务返回空音频")
-
         return pcm
+
+    @staticmethod
+    def _backoff(attempt: int) -> float:
+        """指数退避秒数：0.5s, 1s, 2s ...（与队列版文档示例一致）。
+
+        await asyncio.sleep 不阻塞事件循环，配合后台合成任务安全。
+        """
+        return 0.5 * (2 ** max(attempt, 0))
 
     async def synthesize_to_file(
         self,

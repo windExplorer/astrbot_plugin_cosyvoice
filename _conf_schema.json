@@ -3,9 +3,9 @@
     "type": "string",
     "title": "CosyVoice 服务地址",
     "description": "推理服务根地址",
-    "hint": "例如 http://127.0.0.1:50000（最小 FastAPI，默认端口 50000）",
+    "hint": "队列版服务默认端口 50002（cosyvoice_api_queue.py）；若仍用原版非队列服务则填 50000。接口/字段完全一致，仅队列版新增 429 限流与 /queue 监控",
     "obvious_hint": true,
-    "default": "http://127.0.0.1:50000"
+    "default": "http://127.0.0.1:50002"
   },
   "server_voices_dir": {
     "type": "string",
@@ -25,9 +25,9 @@
   "timeout": {
     "type": "int",
     "title": "请求超时（秒）",
-    "description": "单次合成超时",
-    "hint": "默认 60，长文本建议调大",
-    "default": 60
+    "description": "单次合成读超时（含服务端排队等待）",
+    "hint": "默认 150。队列版服务端单次推理可能 >30s 且入队最多等 30s，故必须 > 服务端 INFER_TIMEOUT(120)+COSY_QUEUE_WAIT(30)；若压太小会自己先超时断连、制造重试验崩。普通文本 60 也够，但配队列版建议保持 150。",
+    "default": 150
   },
   "default_voice": {
     "type": "string",

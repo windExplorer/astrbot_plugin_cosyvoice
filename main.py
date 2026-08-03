@@ -50,9 +50,9 @@ class CosyVoicePlugin(Star):
         self._injected_config = config if config is not None else (self.context.get_config() or {})
         self.config = self._injected_config
         self.client = CosyVoiceClient(
-            base_url=self.config.get("base_url", "http://127.0.0.1:50000"),
+            base_url=self.config.get("base_url", "http://127.0.0.1:50002"),
             sample_rate=int(self.config.get("sample_rate", 24000)),
-            timeout=int(self.config.get("timeout", 60)),
+            timeout=int(self.config.get("timeout", 150)),
         )
         self.engine = TtsEngine(
             self.config, self.client,
