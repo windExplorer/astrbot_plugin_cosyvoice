@@ -4,6 +4,7 @@ import os
 import re
 import json
 import time
+import asyncio
 
 from astrbot.api import logger
 
@@ -37,10 +38,16 @@ def is_speakable(text: str) -> bool:
 
 
 class TtsEngine:
-    def __init__(self, config: dict, client: CosyVoiceClient):
+    def __init__(self, config: dict, client: CosyVoiceClient, concurrency: int = 1):
         self.config = config
         self.client = client
         self.voices: dict = {}
+        # 全局合成并发信号量：限制同时打到 TTS 服务端的请求数。
+        # 弱服务端（GPU 推理）扛不住多并发，多用户同时触发时不限制会把服务端打爆
+        # （连接排队 + 读超时雪崩）。默认 1 = 完全串行，最稳；可调大若服务端够强。
+        # 注意：信号量只在「真正请求服务端」时占用，等待期间是协程挂起，
+        # 不占用 AstrBot 事件循环，因此不会卡住其他消息。
+        self._sem = asyncio.Semaphore(max(1, int(concurrency or 1)))
         self.update_voices(config.get("voices", {}))
 
     # ---------- 路径解析 ----------
@@ -382,7 +389,8 @@ class TtsEngine:
                 logger.info(
                     f"[cosyvoice] 合成 {i}/{total}: \"{ch[:40]}{'...' if len(ch)>40 else ''}\""
                 )
-                pcm = await self.client.synthesize(ch, mode="zero_shot", **kwargs)
+                async with self._sem:
+                    pcm = await self.client.synthesize(ch, mode="zero_shot", **kwargs)
                 if pcm:
                     dt = (time.time() - t0) * 1000
                     logger.info(f"[cosyvoice] 合成 {i}/{total} OK | {dt:.0f}ms {len(pcm)}字节PCM")
@@ -425,7 +433,8 @@ class TtsEngine:
                 logger.info(
                     f"[cosyvoice] 合成 {i}/{total}: \"{ch[:40]}{'...' if len(ch)>40 else ''}\""
                 )
-                pcm = await self.client.synthesize(ch, mode="zero_shot", **kwargs)
+                async with self._sem:
+                    pcm = await self.client.synthesize(ch, mode="zero_shot", **kwargs)
             except CosyVoiceServerError:
                 raise
             except Exception as e:  # noqa: BLE001

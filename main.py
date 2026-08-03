@@ -54,7 +54,10 @@ class CosyVoicePlugin(Star):
             sample_rate=int(self.config.get("sample_rate", 24000)),
             timeout=int(self.config.get("timeout", 60)),
         )
-        self.engine = TtsEngine(self.config, self.client)
+        self.engine = TtsEngine(
+            self.config, self.client,
+            concurrency=int(self.config.get("tts_concurrency", 1) or 1),
+        )
         # 每个消息的事件标记（避免并发串台），以 message_id 为键
         self._flags: dict = {}
         # 本轮模型生成的原文（按会话），用于「结果链文本无效」时回退合成
