@@ -16,6 +16,7 @@ import re
 import json
 import time
 import random
+import asyncio
 
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
@@ -283,32 +284,6 @@ class CosyVoicePlugin(Star):
         if result is not None and hasattr(result, "chain"):
             result.chain.extend(records)
 
-    async def _after_voice_sent(
-        self, event: AstrMessageEvent, cfg: dict, text: str, send_mode: str
-    ):
-        """发语音成功后，把本轮内容补回会话上下文，避免 AI 下一轮“不知道自己发了语音/
-        丢了那轮内容”。
-
-        采用版本无关、零报错风险的方式（只操作结果链，不调用不确定的 context API）：
-        - voice_only：把本轮文字补回结果链（否则历史可能为空导致 AI 失忆；文字由 LLM
-          completion_text 存入会话历史，这里只是兜底确保可见/可记忆）。
-        - both：追加一条简短标记「🎙️（以上已用语音播报）」，让 AI 明确上一轮是语音。
-        配置项 tts_context_hint=false 时完全不补。
-        """
-        if not cfg.get("tts_context_hint", True):
-            return
-        result = getattr(event, "result", None)
-        if result is None or not hasattr(result, "chain"):
-            return
-        if send_mode == "voice_only":
-            # 该模式下原文已从链移除，补回文字避免会话历史为空
-            if text and not any(isinstance(c, Comp.Plain) for c in result.chain):
-                result.chain.insert(0, Comp.Plain(text))
-        else:
-            # both：追加一条语音标记，AI 与用户都能明确上一轮是语音播报
-            if text:
-                result.chain.append(Comp.Plain("🎙️（以上已用语音播报）"))
-
     # ---------- LLM 回复钩子：标记 + 关键词触发 ----------
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
@@ -344,11 +319,10 @@ class CosyVoicePlugin(Star):
             if any(kw and kw in msg for kw in text_kw):
                 self._set_flag(event, "suppress", True)
 
-    # ---------- 装饰结果钩子：追加语音到结果链 ----------
+    # ---------- 装饰结果钩子：不阻塞管线，文字立刻发，语音后台补 ----------
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):
         cfg = self._refresh_cfg()
-        key = self._key(event)
 
         # 本插件的 /tts 指令或 LLM 工具已自行发送语音，避免重复
         if self._get_flag(event, "suppress", False):
@@ -383,17 +357,12 @@ class CosyVoicePlugin(Star):
         if any(isinstance(c, Comp.Record) for c in chain):
             return
 
-        # 服务端熔断：若处于冷却期（之前连续报「连不上」），直接跳过合成、只发文字，
-        # 不再每条消息都去打已经坏掉的服务端，避免刷屏无效请求。
-        # 注意：冷却仅由「真正连不上（CosyVoiceServerError）」触发；偶发的连接中途断开
-        # （ReadError/RemoteProtocolError 等 RequestError）不进冷却，下条消息照常重试，
-        # 避免单段失败就把整个会话静音 30 秒（之前的根因 bug）。
+        # 服务端熔断冷却期：仅发文字，后台也不再打服务端
         if self._server_cooldown_until and time.time() < self._server_cooldown_until:
             return
 
         # 本轮同一条消息若已成功合成过（框架可能重复触发 on_decorating_result），
         # 直接跳过，避免重复打服务端、服务端过载、以及把偶发失败误报成「服务器失联」。
-        # 仅「成功合成过」才登记，失败不登记（天然支持重试，无需 except 兜底 discard）。
         origin = event.unified_msg_origin
         done = self._decorated.get(origin, set())
         if full_text in done:
@@ -403,40 +372,55 @@ class CosyVoicePlugin(Star):
         send_mode = cfg.get("send_mode", "both")
         merge = bool(cfg.get("segment_merge", False))
         voice_name, _, _ = self.engine.resolve_voice(voice)
-        chunks = self.engine.split_text(full_text)
+
+        # voice_only：纯内存操作（很快、不阻塞），把原文从结果链移除，只让后台发语音；
+        # 文字已由 LLM completion_text 存入会话历史，不丢上下文。both 模式保留原文。
+        if send_mode == "voice_only":
+            result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
+
         logger.info(
-            f"[cosyvoice] 准备合成语音 | 音色={voice_name} 总长度={len(full_text)}字 "
-            f"分段数={len(chunks)} 模式={'合并' if merge else '逐段发送'} "
+            f"[cosyvoice] 文字先发，语音转入后台合成 | 音色={voice_name} "
+            f"总长度={len(full_text)}字 模式={'合并' if merge else '逐段发送'} "
             f"send_mode={send_mode}"
         )
-        logger.info(
-            f"[cosyvoice] 全文预览(前80字): {full_text[:80]}{'...' if len(full_text)>80 else ''}"
+
+        # 关键：本钩子【不 await 合成】，文字立刻交给 AstrBot 发出，避免占用事件循环、
+        # 卡住同一会话/全局的其他消息。语音合成放到后台任务，合成完再主动 event.send 补发。
+        # 这样「等一会儿」可接受，但绝不阻塞其他事件。
+        task = asyncio.ensure_future(
+            self._background_speak(event, full_text, voice, send_mode, merge, origin)
         )
+        # 避免「未等待的 Task 异常」警告刷屏
+        task.add_done_callback(self._log_task_exc)
+        self._clear(event)
+
+    def _log_task_exc(self, task):
+        try:
+            exc = task.exception()
+        except (asyncio.CancelledError, Exception):
+            exc = None
+        if exc and not isinstance(exc, asyncio.CancelledError):
+            logger.error(f"[cosyvoice] 后台语音任务异常: {exc}")
+
+    async def _background_speak(
+        self, event: AstrMessageEvent, full_text: str,
+        voice, send_mode: str, merge: bool, origin: str,
+    ):
+        """后台补发语音：不阻塞 on_decorating_result，文字已由 AstrBot 先发出。
+
+        合成成功后主动 event.send 逐段/整段语音；失败仅记日志，不影响已发出的文字。
+        结果链在钩子返回后已由 AstrBot 发送，此处不再改动结果链（避免无效写入）。
+        """
+        cfg = self.config
         try:
             if merge:
-                # 合并模式：全部合成完拼成一个音频，仍可塞进发送链（钩子返回后统一发出）
                 path = await self.engine.synthesize(full_text, voice)
                 if not path:
-                    logger.warning("[cosyvoice] 合成失败，仅发送文本")
+                    logger.warning("[cosyvoice] 后台合成失败，仅发送文本")
                     return
-                if send_mode == "voice_only":
-                    result.chain = [c for c in chain if not isinstance(c, Comp.Plain)] + [
-                        Comp.Record(file=path, url=path)
-                    ]
-                else:
-                    chain.append(Comp.Record(file=path, url=path))
                 audio.schedule_cleanup(path)
-                await self._after_voice_sent(event, cfg, full_text, send_mode)
-                # 整轮成功后才登记幂等 + 解除冷却
-                self._mark_server_ok()
-                self._decorated.setdefault(origin, set()).add(full_text)
-                logger.info("[cosyvoice] 合并合成完成，语音已追加到结果链")
+                await self._realtime_send(event, [Comp.Record(file=path, url=path)])
             else:
-                # 不合并：逐段合成、服务端返回一段就立即发一段（真正的流式发送）。
-                # voice_only 模式下把原文从最终链移除（文字由 LLM completion_text 存入会话历史，不丢），
-                # 只把语音逐条主动发出；both 模式原文仍由 AstrBot 正常发送，语音逐条附发。
-                if send_mode == "voice_only":
-                    result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
                 sent_any = False
                 async for wav in self.engine.iter_segment_wavs(full_text, voice):
                     sent_any = True
@@ -444,31 +428,20 @@ class CosyVoicePlugin(Star):
                     audio.schedule_cleanup(wav)
                     await self._realtime_send(event, [rec])
                 if not sent_any:
-                    logger.warning("[cosyvoice] 合成失败，仅发送文本")
+                    logger.warning("[cosyvoice] 后台合成失败，仅发送文本")
                     return
-                # 流式逐段发完后，补回会话上下文提示（voice_only 下补回文字防失忆）
-                await self._after_voice_sent(event, cfg, full_text, send_mode)
-                # 整轮成功后才登记幂等 + 解除冷却
-                self._mark_server_ok()
-                self._decorated.setdefault(origin, set()).add(full_text)
+            # 整轮成功后才登记幂等 + 解除冷却
+            self._mark_server_ok()
+            self._decorated.setdefault(origin, set()).add(full_text)
+            bucket = self._decorated.get(origin)
+            if bucket and len(bucket) > 20:
+                self._decorated[origin] = set(list(bucket)[-20:])
+            logger.info("[cosyvoice] 后台语音合成完成，已补发")
         except CosyVoiceServerError:
-            # 真正连不上：进入熔断冷却，本条跳过（仅发文字）。
-            self._clear(event)
             logger.warning("[cosyvoice] 语音服务器失联，进入冷却，仅发送文本")
-            self._trip_breaker(chain)
-            return
+            self._trip_breaker([])
         except Exception as e:
-            # 其它合成异常（含服务端连接中途断开的通用 RequestError / ReadError）：
-            # 仅记录并跳过本条（仅发文字），【不进入冷却、不追加失联提示】，
-            # 下条消息照常重试。失败不登记幂等，故本条后续可重试。
-            self._clear(event)
-            logger.warning(f"[cosyvoice] 语音合成失败（本条跳过，下条重试）: {e}")
-            return
-        # 防止幂等集合无限增长：每会话仅保留最近 20 条已合成文本
-        bucket = self._decorated.get(origin)
-        if bucket and len(bucket) > 20:
-            self._decorated[origin] = set(list(bucket)[-20:])
-        self._clear(event)
+            logger.warning(f"[cosyvoice] 后台语音合成失败（本条跳过，下条重试）: {e}")
 
     # ---------- 用户指令：/tts <文本> ----------
     @filter.command("tts")
