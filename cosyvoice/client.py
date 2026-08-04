@@ -78,7 +78,8 @@ class CosyVoiceClient:
         # 略大于服务端 INFER_TIMEOUT+入队等待）。
         self.timeout = timeout
         self._http_timeout = httpx.Timeout(timeout, connect=10.0)
-        self._max_retry = max_retry  # 对「服务可达但本次失败/繁忙」的退避重试次数
+        self._max_retry = max_retry  # 退避重试次数；0=不重试（一次失败直接抛，由插件进冷却+回退文字）
+        self._retry_backoff = retry_backoff  # 退避基数（秒）：实际等待 = base * 2**attempt
         self.cache_dir = cache_dir
         self._sr_fetched = False
         # 复用单一 httpx 客户端（含连接池）：避免每次请求创建/销毁 AsyncClient。
@@ -222,13 +223,12 @@ class CosyVoiceClient:
 
         return pcm
 
-    @staticmethod
-    def _backoff(attempt: int) -> float:
-        """指数退避秒数：0.5s, 1s, 2s ...（与队列版文档示例一致）。
+    def _backoff(self, attempt: int) -> float:
+        """指数退避秒数：base, base*2, base*4 ...（base 由 tts_retry_backoff 配置）。
 
         await asyncio.sleep 不阻塞事件循环，配合后台合成任务安全。
         """
-        return 0.5 * (2 ** max(attempt, 0))
+        return self._retry_backoff * (2 ** max(attempt, 0))
 
     async def synthesize_to_file(
         self,

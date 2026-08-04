@@ -36,9 +36,6 @@ PLUGIN_ID = "astrbot_plugin_cosyvoice"
 
 # 语音服务器连不上时统一给用户的提示（大模型也需要能看懂这是服务器故障）
 SERVER_DOWN_TIP = "\n\n🎙️（语音服务器失联了，可以稍后再试或联系管理员，文字照常发送）"
-# 服务端报错后的熔断冷却时长（秒）：冷却期内本插件不再向服务端发请求，只发文字，
-# 避免服务端已坏时每条消息都去打、反复刷 ReadError。冷却到期后再试一次，成功则恢复。
-SERVER_COOLDOWN_SEC = 30.0
 
 
 @register(PLUGIN_ID, "Yours", "接入本地 CosyVoice3，让机器人以可配置音色朗读回复", "1.0.0")
@@ -53,7 +50,10 @@ class CosyVoicePlugin(Star):
             base_url=self.config.get("base_url", "http://127.0.0.1:50002"),
             sample_rate=int(self.config.get("sample_rate", 24000)),
             timeout=int(self.config.get("timeout", 150)),
+            max_retry=int(self.config.get("tts_max_retry", 0) or 0),
+            retry_backoff=float(self.config.get("tts_retry_backoff", 0.5) or 0.5),
         )
+        self._cooldown_sec = float(self.config.get("tts_cooldown_sec", 30))
         self.engine = TtsEngine(
             self.config, self.client,
             concurrency=int(self.config.get("tts_concurrency", 1) or 1),
@@ -134,16 +134,31 @@ class CosyVoicePlugin(Star):
         self._server_cooldown_until = 0.0
         self._server_down = False
 
-    def _trip_breaker(self, chain: list):
+    def _trip_breaker(self, chain: list = None):
         """合成失败：进入熔断冷却，冷却期内本插件不再向服务端发请求（只发文字）。
 
-        首次进入冷却时在当前链追加一条一次性提示，避免每条消息都刷屏。
-        冷却时长见 SERVER_COOLDOWN_SEC。
+        冷却时长见配置 tts_cooldown_sec。原「在链上追加提示」因后台任务里结果链已发出而无效，
+        故提示改由 _enter_cooldown 主动发送；此处仅记录冷却时间，供 /tts 指令等同步路径复用。
         """
-        self._server_cooldown_until = time.time() + SERVER_COOLDOWN_SEC
+        self._server_cooldown_until = time.time() + getattr(self, "_cooldown_sec", 30.0)
+
+    async def _enter_cooldown(self, event: AstrMessageEvent, send_mode: str, full_text: str):
+        """合成失败：进冷却 + 发一次性失联提示 + 回退文字（voice_only 才需补发文字）。
+
+        - 冷却期内本插件不再向服务端发任何请求（on_decorating_result 直接走回退分支）。
+        - 首次进入冷却时主动发一条 SERVER_DOWN_TIP 提示（用 context.send_message，平台已支持）。
+        - send_mode == "voice_only" 时把文字补发回去，避免前端静默；both 文字已在结果链，跳过。
+        """
+        self._trip_breaker()
         if not self._server_down:
             self._server_down = True
-            chain.append(Comp.Plain(SERVER_DOWN_TIP))
+            try:
+                await self.context.send_message(
+                    event.unified_msg_origin, event.chain_result([Comp.Plain(SERVER_DOWN_TIP)])
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[cosyvoice] 失联提示发送失败: {e}")
+        await self._fallback_text(event, full_text, send_mode)
 
 
     # ---------- 会话级语音开关（按群持久记忆） ----------
@@ -207,6 +222,8 @@ class CosyVoicePlugin(Star):
         self.config = merged
         self.engine.config = merged
         self.engine.update_voices(merged.get("voices") or {})
+        # 冷却时长（秒）：服务端失联后多久内不再发任何 TTS 请求、直接回退文字。
+        self._cooldown_sec = float(merged.get("tts_cooldown_sec", 30))
         return merged
 
     def _in_scope(self, event: AstrMessageEvent, cfg: dict) -> bool:
@@ -372,8 +389,11 @@ class CosyVoicePlugin(Star):
         if any(isinstance(c, Comp.Record) for c in chain):
             return
 
-        # 服务端熔断冷却期：仅发文字，后台也不再打服务端
+        # 服务端熔断冷却期：不再向服务端发任何请求，直接回退文字，避免一直卡着连文字也不发。
+        # both 模式文字已在结果链会正常发出；voice_only 模式文字已被移除，需补发回去。
         if self._server_cooldown_until and time.time() < self._server_cooldown_until:
+            if send_mode == "voice_only":
+                await self._fallback_text(event, full_text, "voice_only")
             return
 
         # 本轮同一条消息若已成功合成过（框架可能重复触发 on_decorating_result），
@@ -423,18 +443,17 @@ class CosyVoicePlugin(Star):
     ):
         """后台补发语音：不阻塞 on_decorating_result，文字已由 AstrBot 先发出。
 
-        合成成功后主动 event.send 逐段/整段语音；失败仅记日志，不影响已发出的文字。
-        结果链在钩子返回后已由 AstrBot 发送，此处不再改动结果链（避免无效写入）。
-        voice_only 模式下文字已从结果链移除，若语音彻底失败，退化为补发文字，
-        避免前端静默（文字仍由 LLM 历史兜底，这里只是确保用户看得到）。
+        合成成功后主动 event.send 逐段/整段语音；失败则进入冷却 + 回退文字（见 _enter_cooldown），
+        冷却期内后续请求不再打服务端、直接回退，避免一直卡着连文字也不发。
+        结果链在钩子返回后已由 AstrBot 发送，此处不再改动结果链。
+        voice_only 模式下文字已从结果链移除，失败退化为补发文字，避免前端静默。
         """
-        cfg = self.config
         try:
             if merge:
                 path = await self.engine.synthesize(full_text, voice)
                 if not path:
-                    logger.warning("[cosyvoice] 后台合成失败，仅发送文本")
-                    await self._fallback_text(event, full_text, send_mode)
+                    logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
+                    await self._enter_cooldown(event, send_mode, full_text)
                     return
                 audio.schedule_cleanup(path)
                 await self._realtime_send(event, [Comp.Record(file=path, url=path)])
@@ -446,8 +465,8 @@ class CosyVoicePlugin(Star):
                     audio.schedule_cleanup(wav)
                     await self._realtime_send(event, [rec])
                 if not sent_any:
-                    logger.warning("[cosyvoice] 后台合成失败，仅发送文本")
-                    await self._fallback_text(event, full_text, send_mode)
+                    logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
+                    await self._enter_cooldown(event, send_mode, full_text)
                     return
             # 整轮成功后才登记幂等 + 解除冷却
             self._mark_server_ok()
@@ -457,12 +476,11 @@ class CosyVoicePlugin(Star):
                 self._decorated[origin] = set(list(bucket)[-20:])
             logger.info("[cosyvoice] 后台语音合成完成，已补发")
         except CosyVoiceServerError:
-            logger.warning("[cosyvoice] 语音服务器失联，进入冷却，仅发送文本")
-            self._trip_breaker([])
-            await self._fallback_text(event, full_text, send_mode)
+            logger.warning("[cosyvoice] 语音服务器失联，进入冷却并回退文字")
+            await self._enter_cooldown(event, send_mode, full_text)
         except Exception as e:
-            logger.warning(f"[cosyvoice] 后台语音合成失败（本条跳过，下条重试）: {e}")
-            await self._fallback_text(event, full_text, send_mode)
+            logger.warning(f"[cosyvoice] 后台语音合成失败（进入冷却并回退文字）: {e}")
+            await self._enter_cooldown(event, send_mode, full_text)
 
     async def _fallback_text(self, event: AstrMessageEvent, full_text: str, send_mode: str):
         """语音彻底失败时，把文字补发回去，避免 voice_only 模式前端静默。
