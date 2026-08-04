@@ -250,6 +250,28 @@ class TtsEngine:
         if not text:
             return []
 
+        # 优先按换行预分段（QQ 等多行消息）：一个/连续多个换行都视为硬边界，
+        # 归一化、逐行 strip、去空，避免把换行符念成噪音/静音块，也避免超长行一次合成。
+        # 每行独立走窗口分段 + 行内短段合并；不跨行合并（多行通常语义独立）。
+        if self._split_by_newline():
+            blocks = [ln.strip() for ln in re.split(r"\n+", text)]
+            blocks = [b for b in blocks if b]
+            if len(blocks) <= 1:
+                # 实际没有换行：退化为整段处理（与原行为一致）
+                return self._split_window(text)
+            chunks: list = []
+            for b in blocks:
+                chunks.extend(self._split_window(b))
+            return chunks
+
+        return self._split_window(text)
+
+    def _split_window(self, text: str) -> list:
+        """按标点窗口对单段文本分段（被 split_text 调用，可能按行多次调用）。"""
+        text = (text or "").strip()
+        if not text:
+            return []
+
         lo, hi = self._seg_window()
         if hi <= 0:
             # 分段关闭：回退到旧 max_text_len 逻辑（按句切 + 超长硬切）
@@ -308,6 +330,10 @@ class TtsEngine:
         # 短段合并：任何 < lo 字的段并入相邻段（优先并入前一段，首段并入后一段）。
         # lo=0 时退化为不合并（保持原分段）。同时剔除空段。
         return self._merge_short(chunks, lo)
+
+    def _split_by_newline(self) -> bool:
+        """配置项 split_by_newline：是否优先按换行预分段（默认开启，QQ 多行消息用）。"""
+        return bool(self.config.get("split_by_newline", True))
 
     @staticmethod
     def _merge_short(chunks: list, min_len: int) -> list:
