@@ -51,6 +51,11 @@
 
 - 修复配置 schema 类型错误：AstrBot 不支持 `number` 类型（报错「不受支持的配置类型 number」），将 `tts_retry_backoff`、`tts_cooldown_sec` 改为 `float`。（功能同 v1.9.0）
 
+## v1.9.2 (2026-08-04)
+
+- 修复 `CosyVoiceClient.__init__() got an unexpected keyword argument 'retry_backoff'`：
+  之前一次替换只改了函数体赋值、漏把 `retry_backoff` 加进 `__init__` 参数列表，导致调用方传参即报错。现补全参数列表，并把 `max_retry` 默认值归正为 0（匹配"默认不重试"设计）。（功能同 v1.9.0/1.9.1）
+
 ## v1.4.4 (2026-08-02)
 
 - 修复「卡半天报语音服务器失联、但语音最终却送达」的问题：根因是 AstrBot 框架对同一条消息重复触发 `on_decorating_result`，导致重复合成、给 CosyVoice 服务端加压，第二次请求在传输中途被服务端断开（httpx 通用 RequestError，错误信息为空），被误报为「服务器失联」。

@@ -67,7 +67,8 @@ class CosyVoiceClient:
         sample_rate: int = 24000,
         timeout: int = 150,
         cache_dir: str = "",
-        max_retry: int = 3,
+        max_retry: int = 0,
+        retry_backoff: float = 0.5,
     ):
         self.base_url = base_url.rstrip("/")
         self.sample_rate = sample_rate
