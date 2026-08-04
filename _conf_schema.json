@@ -217,14 +217,14 @@
     "default": 0
   },
   "tts_retry_backoff": {
-    "type": "number",
+    "type": "float",
     "title": "重试退避基数（秒）",
     "description": "每次重试前的等待 = 基数 × 2^第几次重试",
     "hint": "默认 0.5。仅 tts_max_retry>0 时生效；实际等待为 0.5s、1s、2s…。不想让重试拖太久就调小。",
     "default": 0.5
   },
   "tts_cooldown_sec": {
-    "type": "number",
+    "type": "float",
     "title": "语音失败冷却时长（秒）",
     "description": "服务端失联/失败后，多久内不再向服务端发任何请求、直接回退文字",
     "hint": "默认 30。一次语音失败（含重试耗尽）即进入冷却：冷却期内本插件完全不打 TTS 服务端、直接发文字（voice_only 也回退文字），避免一直卡着连文字也不发。冷却到期后再试一次，成功则恢复。调大可避免在服务端恢复前反复失败。",

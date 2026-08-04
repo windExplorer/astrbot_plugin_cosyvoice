@@ -47,6 +47,10 @@
   - 失败即进冷却（任意异常，不只 CosyVoiceServerError）：新增 `_enter_cooldown` 统一「进冷却 + 发一次性失联提示 + voice_only 回退文字」；both 模式文字已在结果链正常发。冷却期内 on_decorating_result 对 voice_only 也补发文字，避免前端静默。
   - 顺手修了旧 bug：原 `_trip_breaker` 在后台任务里往空 list 追加提示导致失联提示永不显示，现改由 `_enter_cooldown` 用 `context.send_message` 主动发送。
 
+## v1.9.1 (2026-08-04)
+
+- 修复配置 schema 类型错误：AstrBot 不支持 `number` 类型（报错「不受支持的配置类型 number」），将 `tts_retry_backoff`、`tts_cooldown_sec` 改为 `float`。（功能同 v1.9.0）
+
 ## v1.4.4 (2026-08-02)
 
 - 修复「卡半天报语音服务器失联、但语音最终却送达」的问题：根因是 AstrBot 框架对同一条消息重复触发 `on_decorating_result`，导致重复合成、给 CosyVoice 服务端加压，第二次请求在传输中途被服务端断开（httpx 通用 RequestError，错误信息为空），被误报为「服务器失联」。
