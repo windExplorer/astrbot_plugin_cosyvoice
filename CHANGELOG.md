@@ -72,6 +72,14 @@
   - 失败/冷却分支同样改为主动发提示文字 + 返回字符串，LLM 能感知结果。
   - `/tts` 手动指令（command）的 yield 逐段发送机制不受影响，未改动。
 
+## v1.11.1 (2026-08-05)
+
+- 修复「开了 tts_on 仍有文字没转语音直接发出」：`_should_tts` 在默认 `llm_only` 下强依赖 `is_llm` 标志（由 `on_llm_response` 钩子设置），若该钩子因 AstrBot 版本/工具循环 final response 路径差异未触发，`is_llm` 缺失 → `tts_on` 开着也直接发文字。现改为：用户显式 `/tts_on` 开启会话后（`session_on`）不再依赖 `is_llm`，视为已授权「本聊天都念」。
+- 加固逐段语音发送，避免「只念了一段、中间几段没发」：
+  - `_realtime_send` 全量捕获异常（含 `event.chain_result` 构造、`event.send`、`context.send_message`），任何失败只记日志不外抛——不中断整个逐段循环。
+  - `_background_speak` 逐段循环内再包一层 try：单段发送失败只跳过该段，后续段继续发出。
+- `/tts` 手动指令与 LLM 工具不受影响。
+
 ## v1.4.4 (2026-08-02)
 
 - 修复「卡半天报语音服务器失联、但语音最终却送达」的问题：根因是 AstrBot 框架对同一条消息重复触发 `on_decorating_result`，导致重复合成、给 CosyVoice 服务端加压，第二次请求在传输中途被服务端断开（httpx 通用 RequestError，错误信息为空），被误报为「服务器失联」。

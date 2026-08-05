@@ -263,7 +263,11 @@ class CosyVoicePlugin(Star):
                 return False
 
         if cfg.get("tts_scope", "llm_only") == "llm_only":
-            base = bool(is_llm and (auto or want or session_on))
+            # llm_only：仅 LLM 回复转语音。但用户显式 /tts_on 开启会话语音时，视为已授权
+            # 「本聊天都念」，不再强依赖 is_llm 标志（该标志由 on_llm_response 钩子设置；
+            # 若因 AstrBot 钩子机制/工具循环 final response 路径差异导致钩子未触发、
+            # is_llm 缺失，tts_on 开着也会直接发文字不转语音——本行修复此问题）。
+            base = bool(session_on or want or (is_llm and auto))
         else:
             # all_text：自动开启则全部；否则仅关键词/工具触发或本会话已开
             base = bool(auto or want or session_on)
@@ -299,20 +303,23 @@ class CosyVoicePlugin(Star):
         早已 return、结果链已被 AstrBot 发出，extend 是无效操作且会静默丢语音；故不可用时
         直接记 WARNING，由调用方决定是否影响（voice_only 下文字已由 LLM 历史兜底，不丢上下文）。
         """
-        chain = event.chain_result(records)
-        send = getattr(event, "send", None)
-        if callable(send):
-            try:
-                await send(chain)
-                return
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"[cosyvoice] event.send 实时发送失败，尝试 context.send_message: {e}")
+        # 整体 try：任何异常（含 event.chain_result 构造、event.send、context.send_message）
+        # 都只记日志、不外抛——避免单段发送失败中断整个逐段循环导致后续段全丢。
         try:
+            chain = event.chain_result(records)
+            send = getattr(event, "send", None)
+            if callable(send):
+                try:
+                    await send(chain)
+                    return
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        f"[cosyvoice] event.send 实时发送失败，尝试 context.send_message: {e}"
+                    )
             await self.context.send_message(event.unified_msg_origin, chain)
-            return
         except Exception as e:  # noqa: BLE001
             logger.warning(
-                f"[cosyvoice] 语音后台补发失败（平台可能不支持主动消息）: {e}"
+                f"[cosyvoice] 语音补发失败（平台可能不支持主动消息）: {e}"
                 f" | unified_msg_origin={event.unified_msg_origin}"
             )
 
@@ -463,7 +470,11 @@ class CosyVoicePlugin(Star):
                     sent_any = True
                     rec = Comp.Record(file=wav, url=wav)
                     audio.schedule_cleanup(wav)
-                    await self._realtime_send(event, [rec])
+                    try:
+                        await self._realtime_send(event, [rec])
+                    except Exception as e:  # noqa: BLE001
+                        # 单段发送失败只跳过该段，不影响后续段继续发出
+                        logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
                 if not sent_any:
                     logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
                     await self._enter_cooldown(event, send_mode, full_text)
