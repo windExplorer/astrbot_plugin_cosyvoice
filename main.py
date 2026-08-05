@@ -702,13 +702,12 @@ class CosyVoicePlugin(Star):
         """
         self._refresh_cfg()
         if not self.config.get("enable_llm_tool", True):
-            yield event.plain_result("语音功能还没开呢，先把它打开我就能念啦～")
-            return
+            return "语音功能还没开呢，先把它打开我就能念啦～"
 
         # 服务端熔断冷却期内，直接提示，不再去打已坏的服务端
         if self._server_cooldown_until and time.time() < self._server_cooldown_until:
-            yield event.plain_result(SERVER_DOWN_TIP)
-            return
+            await self._realtime_send(event, [Comp.Plain(SERVER_DOWN_TIP)])
+            return "语音服务器暂时失联，已用文字回复你。"
 
         self._set_flag(event, "suppress", True)
         if voice:
@@ -720,8 +719,7 @@ class CosyVoicePlugin(Star):
             if is_speakable(fb):
                 text = fb
             else:
-                yield event.plain_result("你想让我念点啥呀？把文字发给我就行～")
-                return
+                return "用户没有提供要朗读的文本，请让用户先给出具体内容。"
 
         target_voice = voice or self._session_voice(event)
         send_mode = self.config.get("send_mode", "both")
@@ -730,33 +728,37 @@ class CosyVoicePlugin(Star):
             if merge:
                 path = await self.engine.synthesize(text.strip(), target_voice)
                 if not path:
-                    yield event.plain_result("话到嘴边卡壳了，这次没念出来，待会儿再试试？")
-                    return
-                if send_mode == "both":
-                    yield event.chain_result([Comp.Plain(text), Comp.Record(file=path, url=path)])
-                else:
-                    yield event.chain_result([Comp.Record(file=path, url=path)])
+                    await self._realtime_send(event, [Comp.Plain("话到嘴边卡壳了，这次没念出来，待会儿再试试？")])
+                    return "语音合成失败，已告知用户。"
                 audio.schedule_cleanup(path)
-            else:
-                # 不合并：边合成边逐段 yield（每段独立一条消息，服务端返回一段即发一段）
                 if send_mode == "both":
-                    yield event.plain_result(text)
+                    await self._realtime_send(event, [Comp.Plain(text), Comp.Record(file=path, url=path)])
+                else:
+                    await self._realtime_send(event, [Comp.Record(file=path, url=path)])
+            else:
+                # 不合并：边合成边逐段主动发送（每段独立一条消息，服务端返回一段即发一段）
+                if send_mode == "both":
+                    await self._realtime_send(event, [Comp.Plain(text)])
                 sent = False
                 async for wav in self.engine.iter_segment_wavs(text.strip(), target_voice):
                     sent = True
-                    yield event.chain_result([Comp.Record(file=wav, url=wav)])
+                    await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
                     audio.schedule_cleanup(wav)
                 if not sent:
-                    yield event.plain_result("话到嘴边卡壳了，这次没念出来，待会儿再试试？")
+                    await self._realtime_send(event, [Comp.Plain("话到嘴边卡壳了，这次没念出来，待会儿再试试？")])
+                    return "语音合成失败，已告知用户。"
+            self._mark_server_ok()
+            return "已用语音朗读，语音已发送给用户。"
         except CosyVoiceServerError:
-            self._trip_breaker([])
-            yield event.plain_result(SERVER_DOWN_TIP)
-            return
+            self._trip_breaker()
+            logger.warning("[cosyvoice] text_to_speech 服务器失联，进入冷却")
+            await self._realtime_send(event, [Comp.Plain(SERVER_DOWN_TIP)])
+            return "语音服务器失联，已用文字告知用户。"
         except Exception as e:
             # 偶发错误（如连接中途断开）不进熔断，仅提示本条失败，可重试
             logger.warning(f"[cosyvoice] text_to_speech 合成失败（本条跳过）: {e}")
-            yield event.plain_result("话到嘴边卡壳了，这次没念出来，待会儿再试试？")
-            return
+            await self._realtime_send(event, [Comp.Plain("话到嘴边卡壳了，这次没念出来，待会儿再试试？")])
+            return "语音合成失败，已告知用户。"
 
     # ---------- LLM 工具：自然语言开关当前会话语音模式 ----------
     @filter.llm_tool(name="set_voice_mode")

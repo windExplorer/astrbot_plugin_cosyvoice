@@ -65,6 +65,13 @@
   - 无实际换行时退化为整段窗口分段（与原行为一致）；配置关闭则完全走旧逻辑。
   - 已用临时脚本验证：连续换行、短首行、空行夹杂、单行无换行均符合预期。
 
+## v1.11.0 (2026-08-05)
+
+- 修复 LLM 工具 `text_to_speech` 丢段：AstrBot 的 `llm_tool` runner 期望工具返回**字符串**作为 tool result 喂回给 LLM，而该工具原来用 `yield event.chain_result(...)` 逐段发消息组件，导致中间段被吞、只有最后一段发出，且日志提示「text_to_speech 没有返回值」。
+  - 改为与其它工具一致的写法：逐段合成后用 `_realtime_send`（event.send → context.send_message）**主动发送**每一段语音（与 on_decorating_result 后台补发同一套可靠机制），不再 yield 消息组件；最终 `return` 一个简短字符串给 LLM 作为 tool result。
+  - 失败/冷却分支同样改为主动发提示文字 + 返回字符串，LLM 能感知结果。
+  - `/tts` 手动指令（command）的 yield 逐段发送机制不受影响，未改动。
+
 ## v1.4.4 (2026-08-02)
 
 - 修复「卡半天报语音服务器失联、但语音最终却送达」的问题：根因是 AstrBot 框架对同一条消息重复触发 `on_decorating_result`，导致重复合成、给 CosyVoice 服务端加压，第二次请求在传输中途被服务端断开（httpx 通用 RequestError，错误信息为空），被误报为「服务器失联」。
