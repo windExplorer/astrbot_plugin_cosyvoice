@@ -263,11 +263,14 @@ class CosyVoicePlugin(Star):
                 return False
 
         if cfg.get("tts_scope", "llm_only") == "llm_only":
-            # llm_only：仅 LLM 回复转语音。但用户显式 /tts_on 开启会话语音时，视为已授权
-            # 「本聊天都念」，不再强依赖 is_llm 标志（该标志由 on_llm_response 钩子设置；
-            # 若因 AstrBot 钩子机制/工具循环 final response 路径差异导致钩子未触发、
-            # is_llm 缺失，tts_on 开着也会直接发文字不转语音——本行修复此问题）。
-            base = bool(session_on or want or (is_llm and auto))
+            # llm_only：只转「大模型回复」的语音（默认语义，勿放宽成"会话开了就全转"）。
+            # is_llm 由 on_llm_response 钩子设置，是本语义的依据；若因 AstrBot 钩子机制/
+            # 工具循环 final response 路径差异导致该钩子未触发、is_llm 缺失，则用
+            # _last_llm（on_llm_response 每次都会写入本轮模型原文）兜底：只要本轮确有大模型
+            # 原文记录，即视为 LLM 回复——既保住 tts_on 开着的 LLM 回复能转，
+            # 又不把非大模型消息（指令输出等）误转语音。
+            llm_recorded = bool(self._last_llm.get(event.unified_msg_origin))
+            base = bool((is_llm or llm_recorded) and (auto or want or session_on))
         else:
             # all_text：自动开启则全部；否则仅关键词/工具触发或本会话已开
             base = bool(auto or want or session_on)
