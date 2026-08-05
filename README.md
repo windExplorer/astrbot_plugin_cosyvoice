@@ -33,7 +33,8 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
-| `base_url` | `http://127.0.0.1:50000` | CosyVoice 服务地址 |
+| `base_url` | `http://127.0.0.1:50000` | CosyVoice 服务地址（单机模式；配置了 `servers` 后不再使用） |
+| `servers` | `[]` | **多机分流**：可配置多台 CosyVoice 服务地址（`url` / `enabled` / `weight`），同时启用、按权重分流；某台故障自动临时隔离，其余节点继续服务 |
 | `server_voices_dir` | `""` | CosyVoice 服务端参考音频目录（填后 `prompt_wav` 只传文件名，服务端本地读，避免大文件重复上传） |
 | `sample_rate` | `24000` | 采样率（Hz）。插件首次合成时会向服务端 `/` 接口查询真实采样率并自动覆盖此值 |
 | `timeout` | `60` | 请求超时（秒） |
@@ -41,7 +42,9 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 | `voices` | `[]` | 音色列表（**template_list 逐条编辑**）：每条含「音色名 / 参考音频 / 参考文本」，可增删 |
 | `send_mode` | `both` | `both` / `voice_only` |
 | `auto_tts` | `false` | 是否自动语音 |
-| `tts_scope` | `llm_only` | `llm_only` / `all_text` |
+| `tts_scope` | `llm_only` | `llm_only`（仅大模型回复）/ `all_text`（所有文本） |
+
+> `tts_scope=llm_only` 时只对「大模型回复」转语音，其他插件返回的固定文案、指令输出等不会被转成语音。
 | `enable_llm_tool` | `true` | 注册 `text_to_speech` 工具 |
 | `enable_user_trigger` | `true` | 启用关键词触发 |
 | `trigger_keywords` | `["念出来","读出来"]` | 触发关键词（已去除过于宽泛的「语音」，改由内置 SKILL.md 语义触发接管「用语音」场景） |
@@ -54,6 +57,7 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 本插件运行在 **AstrBot 服务端**，CosyVoice 推理服务通常在另一台机器（如本机）。需注意：
 
 - `base_url` 必须是**从 AstrBot 服务端网络可达**的 CosyVoice 地址（本地机需做端口映射/内网穿透/同网段）。
+- **多机分流**：在「服务端列表」`servers` 中添加多台地址即可同时启用并按权重分流（`weight` 越大概率越高）。某台连续失败 3 次会被临时隔离 30 秒，期间请求自动走其他节点，隔离到期后自动恢复探测；全部节点都不可用时自动回退到 `base_url` 单机模式。
 - **参考音频放哪（推荐放 CosyVoice 服务端）**：把 wav 放到 CosyVoice 机器的 `--voices_dir` 目录，并同目录放 `voices.json`（`{"文件名": "参考文本"}`）。插件配置 `server_voices_dir` 填同样路径、`voices.<音色>.prompt_wav` 只写文件名、`prompt_text` 可留空（服务端从 `voices.json` 自动取）。这样插件**只传文件名**，服务端读本地文件与文本，大文件不重复上传。
 - **回退（上传模式）**：不填 `server_voices_dir` 时，`prompt_wav` 视为 AstrBot 服务端本地路径，插件读取后以表单上传（此时 wav 需放在 AstrBot 服务端，文本仍需在 `prompt_text` 填）。
 - 当前跑着的 CosyVoice WebUI 多为 **Gradio**（`/gradio_api/...`），与插件接口不兼容。请改用仓库内 `deploy/cosyvoice_api.py` 起一个最小 FastAPI 服务，端口若冲突先停掉 Gradio 版或换端口。

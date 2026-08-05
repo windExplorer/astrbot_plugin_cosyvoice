@@ -30,6 +30,7 @@ except Exception:  # noqa: BLE001
 
 from .core.tts_engine import TtsEngine, is_speakable
 from .cosyvoice.client import CosyVoiceClient, CosyVoiceServerError
+from .cosyvoice.router import CosyVoiceRouter
 from .utils import audio
 
 PLUGIN_ID = "astrbot_plugin_cosyvoice"
@@ -46,8 +47,11 @@ class CosyVoicePlugin(Star):
         # 部分版本也保留 context.get_config()，这里做兼容：优先用注入配置，回退到 get_config()。
         self._injected_config = config if config is not None else (self.context.get_config() or {})
         self.config = self._injected_config
-        self.client = CosyVoiceClient(
-            base_url=self.config.get("base_url", "http://127.0.0.1:50002"),
+        # 多服务端负载均衡：优先 servers 列表（url/enabled/weight 分流），
+        # 为空时回退到 base_url 单机模式（兼容旧配置）。
+        self.client = CosyVoiceRouter(
+            servers=self.config.get("servers") or [],
+            fallback_url=self.config.get("base_url", "http://127.0.0.1:50002"),
             sample_rate=int(self.config.get("sample_rate", 24000)),
             timeout=int(self.config.get("timeout", 150)),
             max_retry=int(self.config.get("tts_max_retry", 0) or 0),
@@ -126,8 +130,18 @@ class CosyVoicePlugin(Star):
     def _get_flag(self, event: AstrMessageEvent, k: str, default=False):
         return self._flags.get(self._key(event), {}).get(k, default)
 
-    def _clear(self, event: AstrMessageEvent):
+    def _clear(self, event: AstrMessageEvent, clear_llm: bool = False):
+        """清理本条消息的事件标记。
+
+        :param clear_llm: 是否同时清理本条消息残留的 LLM 原文与用户原消息缓存。
+            on_decorating_result 是每轮消息的最后钩子，处理完即清，避免「上一轮的大模型
+            原文」残留到下一轮、把非大模型消息（其他插件固定文案等）误判为 LLM 回复转语音。
+        """
         self._flags.pop(self._key(event), None)
+        if clear_llm:
+            origin = event.unified_msg_origin
+            self._last_llm.pop(origin, None)
+            self._last_user_msg.pop(origin, None)
 
     def _mark_server_ok(self):
         """合成成功：解除熔断冷却，并复位失联提示标志，便于下次真的失联时再提示。"""
@@ -222,9 +236,33 @@ class CosyVoicePlugin(Star):
         self.config = merged
         self.engine.config = merged
         self.engine.update_voices(merged.get("voices") or {})
+        # 多服务端配置热更新：servers 列表或 base_url 变化时重建分流节点。
+        self._refresh_servers(merged)
         # 冷却时长（秒）：服务端失联后多久内不再发任何 TTS 请求、直接回退文字。
         self._cooldown_sec = float(merged.get("tts_cooldown_sec", 30))
         return merged
+
+    def _refresh_servers(self, merged: dict):
+        """多服务端节点热更新：仅当 servers/base_url 与当前不一致时才重建。
+
+        AstrBot 每条消息都可能调用 _refresh_cfg，不能每次都重建 client
+        （会反复销毁/新建 httpx 连接池）。这里对比签名，变化才触发。
+        """
+        servers = merged.get("servers") or []
+        fallback = (merged.get("base_url") or "http://127.0.0.1:50002").strip().rstrip("/")
+        sig = repr(sorted(servers, key=lambda s: str(s.get("url")))) + "|" + fallback
+        if getattr(self, "_server_sig", None) == sig:
+            return
+        self._server_sig = sig
+        try:
+            # 仅在为 Router 时重建；兼容个别情况下仍是旧 client 的极端场景
+            if isinstance(self.client, CosyVoiceRouter):
+                self.client.update_servers(
+                    servers,
+                    sample_rate=int(merged.get("sample_rate", 24000)),
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[cosyvoice] 更新服务端节点失败: {e}")
 
     def _in_scope(self, event: AstrMessageEvent, cfg: dict) -> bool:
         """根据 blocklist/allowlist 判断该会话是否允许转语音。"""
@@ -264,13 +302,17 @@ class CosyVoicePlugin(Star):
 
         if cfg.get("tts_scope", "llm_only") == "llm_only":
             # llm_only：只转「大模型回复」的语音（默认语义，勿放宽成"会话开了就全转"）。
-            # is_llm 由 on_llm_response 钩子设置，是本语义的依据；若因 AstrBot 钩子机制/
-            # 工具循环 final response 路径差异导致该钩子未触发、is_llm 缺失，则用
-            # _last_llm（on_llm_response 每次都会写入本轮模型原文）兜底：只要本轮确有大模型
-            # 原文记录，即视为 LLM 回复——既保住 tts_on 开着的 LLM 回复能转，
-            # 又不把非大模型消息（指令输出等）误转语音。
+            # 判定依据（按优先级）：
+            #   1) llm_this_round：本轮确实触发过 on_llm_response 的标记（最精确，随本轮
+            #      _flags 清理，不会残留到下一轮）；
+            #   2) is_llm：on_llm_response 设置的标志；
+            #   3) llm_recorded：_last_llm 存在本轮大模型原文（钩子路径差异兜底）。
+            # 绝不使用「上一轮残留的 _last_llm」——否则同会话里其他插件的固定文案
+            # （非大模型消息）也会被误转语音。
+            llm_this_round = self._get_flag(event, "llm_this_round", False)
             llm_recorded = bool(self._last_llm.get(event.unified_msg_origin))
-            base = bool((is_llm or llm_recorded) and (auto or want or session_on))
+            is_llm_reply = bool(is_llm or llm_this_round or llm_recorded)
+            base = bool(is_llm_reply and (auto or want or session_on))
         else:
             # all_text：自动开启则全部；否则仅关键词/工具触发或本会话已开
             base = bool(auto or want or session_on)
@@ -331,6 +373,10 @@ class CosyVoicePlugin(Star):
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
         self._refresh_cfg()
         self._set_flag(event, "is_llm", True)
+        # 本轮确有大模型回复的标记：随 _flags 在本轮结束被 _clear 清掉，
+        # 用于 _should_tts 精确判断「本条是否 LLM 回复」，避免把上一轮残留的
+        # _last_llm 原文误当成本轮、导致其他插件的固定文案也被转语音。
+        self._set_flag(event, "llm_this_round", True)
 
         # 记住本轮模型原文，供结果链文本缺失/异常（如混入 [] 占位符）时回退合成。
         # 无论是否为空都覆盖写入，避免回退时误用上一轮的真实文本（tts_on 下会念错内容）。
@@ -368,10 +414,13 @@ class CosyVoicePlugin(Star):
 
         # 本插件的 /tts 指令或 LLM 工具已自行发送语音，避免重复
         if self._get_flag(event, "suppress", False):
-            self._clear(event)
+            self._clear(event, clear_llm=True)
             return
 
         if not self._should_tts(event, cfg):
+            # 本条不转语音（未开启/用户要求文字/概率未命中等），同样清理 LLM 残留，
+            # 防止上一轮大模型原文污染下一轮、把非大模型消息误转语音。
+            self._clear(event, clear_llm=True)
             return
 
         result = event.get_result()
@@ -437,7 +486,7 @@ class CosyVoicePlugin(Star):
         )
         # 避免「未等待的 Task 异常」警告刷屏
         task.add_done_callback(self._log_task_exc)
-        self._clear(event)
+        self._clear(event, clear_llm=True)
 
     def _log_task_exc(self, task):
         try:

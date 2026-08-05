@@ -80,6 +80,15 @@
   - `_background_speak` 逐段循环内再包一层 try：单段发送失败只跳过该段，后续段继续发出。
 - `/tts` 手动指令与 LLM 工具不受影响。
 
+## v1.12.0 (2026-08-05)
+
+- 修复 `tts_scope=llm_only` 下其他插件返回的固定文案也被转语音的问题：根因是同会话内上一轮大模型原文残留在 `_last_llm`，下一轮非大模型消息被误判为 LLM 回复。修复方式：`on_llm_response` 新增 `llm_this_round` 本轮标记（随本轮结束自动清理），`_should_tts` 以本轮标记为判定主依据；`on_decorating_result` 各路径（合成/早退/不触发）结束后清理 `_last_llm`/`_last_user_msg` 残留，杜绝跨轮污染。
+- 支持多台 CosyVoice 推理服务同时启用并按权重分流（多机负载均衡）。
+  - 新增配置项 `servers`（服务端列表）：每项 `url`（地址）/ `enabled`（是否启用）/ `weight`（分流权重），`template_list` 形式在插件配置面板逐条添加。
+  - 新增 `cosyvoice/router.py`：`CosyVoiceRouter` 内部管理多个 `CosyVoiceClient`，按权重随机分流；单节点连续失败 3 次自动临时隔离 30 秒（其余节点照常服务），到期自动恢复探测；全部节点不可用时回退到 `base_url` 单机模式。
+  - 兼容旧配置：`base_url` 保留为单机模式，配置了 `servers` 后以 `servers` 为准；配置热更新（`_refresh_servers`）仅当 `servers`/`base_url` 变化时才重建节点，避免每条消息反复重建连接池。
+  - `TtsEngine` 无需改动（`router` 暴露与单客户端一致的 `synthesize`/`sample_rate`/`cache_dir` 接口）。
+
 ## v1.11.2 (2026-08-05)
 
 - 修复 v1.11.1 引入的语义回归：`tts_scope=llm_only`（只转大模型语音）被误放宽成「`tts_on` 会话开启就全转」，导致指令输出等非大模型文本也被转语音。
