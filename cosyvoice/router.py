@@ -60,7 +60,7 @@ class CosyVoiceRouter:
 
     # ---------- 节点管理 ----------
     def _normalize(self, servers: list[dict] | None) -> list[dict]:
-        """归一化 servers 配置：{url, enabled, weight} -> 过滤后的可用节点原始配置。"""
+        """归一化 servers 配置：{url, enabled, default, weight} -> 过滤后的可用节点原始配置。"""
         if not servers:
             return []
         out: list[dict] = []
@@ -75,12 +75,15 @@ class CosyVoiceRouter:
                 enabled = enabled.strip().lower() not in ("0", "false", "no", "off")
             if not enabled:
                 continue
+            default = item.get("default", False)
+            if isinstance(default, str):
+                default = default.strip().lower() in ("1", "true", "yes", "on")
             weight = 0
             try:
                 weight = max(1, int(float(item.get("weight", 1) or 1)))
             except (TypeError, ValueError):
                 weight = 1
-            out.append({"url": url, "enabled": True, "weight": weight})
+            out.append({"url": url, "enabled": True, "default": bool(default), "weight": weight})
         return out
 
     def _rebuild(self, servers: list[dict] | None, sample_rate: int):
@@ -105,6 +108,7 @@ class CosyVoiceRouter:
                 {
                     "url": item["url"],
                     "weight": item["weight"],
+                    "default": bool(item.get("default", False)),
                     "client": client,
                     "failed": 0,
                     "cooldown_until": 0.0,
@@ -117,9 +121,11 @@ class CosyVoiceRouter:
             except Exception:  # noqa: BLE001
                 pass
         self._nodes = nodes
+        defaults = [n["url"] for n in nodes if n["default"]]
         logger.info(
             f"[cosyvoice] 负载均衡已启用，节点: "
             + ", ".join(f"{n['url']}(w={n['weight']})" for n in nodes)
+            + (f" | 默认节点: {defaults}" if defaults else "")
         )
 
     def update_servers(self, servers: list[dict] | None, sample_rate: int = 24000):
@@ -128,11 +134,17 @@ class CosyVoiceRouter:
 
     # ---------- 分流选择 ----------
     def _pick_index(self) -> int:
-        """按权重随机选一个【可用】（非冷却中）节点；全冷却则退回第一个。"""
+        """选一个【可用】（非冷却中）节点：
+        优先默认节点（default=true 且可用），有多个默认则随机取一；
+        否则按权重随机分流；全冷却则退回第一个可用。"""
         now = time.time()
         candidates = [i for i, n in enumerate(self._nodes) if n["cooldown_until"] <= now]
         if not candidates:
             candidates = list(range(len(self._nodes)))
+        # 默认节点优先（若配置了 default 且当前可用）
+        defaults = [i for i in candidates if self._nodes[i].get("default")]
+        if defaults:
+            return random.choice(defaults)
         weights = [self._nodes[i]["weight"] for i in candidates]
         total = sum(weights) or 1
         r = random.uniform(0, total)

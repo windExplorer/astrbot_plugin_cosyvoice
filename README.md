@@ -33,8 +33,8 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
-| `base_url` | `http://127.0.0.1:50000` | CosyVoice 服务地址（单机模式；配置了 `servers` 后不再使用） |
-| `servers` | `[]` | **多机分流**：可配置多台 CosyVoice 服务地址（`url` / `enabled` / `weight`），同时启用、按权重分流；某台故障自动临时隔离，其余节点继续服务 |
+| `base_url` | `http://127.0.0.1:50002` | CosyVoice 服务地址（单机模式；配置了 `servers` 后仅作全部节点不可用时的回退） |
+| `servers` | `[]` | **多机分流**：可配置多台 CosyVoice 服务地址（`url` / `enabled` / `default` / `weight`），同时启用、按权重分流；「设为默认」的节点优先使用；某台故障自动临时隔离，其余节点继续服务 |
 | `server_voices_dir` | `""` | CosyVoice 服务端参考音频目录（填后 `prompt_wav` 只传文件名，服务端本地读，避免大文件重复上传） |
 | `sample_rate` | `24000` | 采样率（Hz）。插件首次合成时会向服务端 `/` 接口查询真实采样率并自动覆盖此值 |
 | `timeout` | `60` | 请求超时（秒） |
