@@ -416,7 +416,11 @@ class TtsEngine:
                     f"[cosyvoice] 合成 {i}/{total}: \"{ch[:40]}{'...' if len(ch)>40 else ''}\""
                 )
                 async with self._sem:
-                    pcm = await self.client.synthesize(ch, mode="zero_shot", **kwargs)
+                    # 整轮只有第一段做「排队过长」判定（探路）：通过则后续段照常合成，
+                    # 避免「前半段发出、后半段因排队被弃」的半截语音（合并模式同理）。
+                    pcm = await self.client.synthesize(
+                        ch, mode="zero_shot", check_queue=(i == 1), **kwargs
+                    )
                 if pcm:
                     dt = (time.time() - t0) * 1000
                     logger.info(f"[cosyvoice] 合成 {i}/{total} OK | {dt:.0f}ms {len(pcm)}字节PCM")
@@ -464,7 +468,11 @@ class TtsEngine:
                     f"[cosyvoice] 合成 {i}/{total}: \"{ch[:40]}{'...' if len(ch)>40 else ''}\""
                 )
                 async with self._sem:
-                    pcm = await self.client.synthesize(ch, mode="zero_shot", **kwargs)
+                    # 整轮只有第一段做「排队过长」判定（探路）：通过则后续段照常合成，
+                    # 避免「前半段发出、后半段因排队被弃」的半截语音（不合并模式）。
+                    pcm = await self.client.synthesize(
+                        ch, mode="zero_shot", check_queue=(i == 1), **kwargs
+                    )
             except CosyVoiceServerError:
                 raise
             except QueueFullError:

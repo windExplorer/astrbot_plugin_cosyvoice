@@ -121,12 +121,17 @@ class CosyVoiceClient:
         prompt_text: str = "",
         prompt_wav_path: str = "",
         mode: str = "zero_shot",
+        check_queue: bool = True,
     ) -> bytes:
         """请求合成，返回裸 int16 PCM 字节（未封装 WAV 头）。
 
         mode=zero_shot 需要 prompt_text + 参考音频。参考音频二选一：
           - prompt_wav_path：服务端本地文件名（无需上传，推荐大文件用），
           - prompt_wav：AstrBot 服务端本地路径，会以文件形式上传。
+
+        check_queue：是否对本次请求做「排队过长」判定（读 X-Queue-Position）。
+        同一轮回复的多个分段中，只有第一段传 True（探路）：它通过说明队列健康，
+        后续段跳过判定、照常合成，避免「前半段发出、后半段因排队被弃」的半截语音。
         """
         # 首次合成时向服务端查询真实采样率，确保 WAV 编码与实际 PCM 一致
         if not self._sr_fetched:
@@ -210,7 +215,8 @@ class CosyVoiceClient:
             # 仅当服务端返回该头时生效；直连 CosyVoice 无此头，完全不受影响。
             # 排队位置 >= 阈值（tts_queue_max_position）时判定「服务器繁忙」，
             # 立即抛 QueueFullError 由上层回退文字，避免傻等（ReadTimeout）与重试验崩。
-            if self._queue_max_position > 0:
+            # check_queue=False（多段回复的后续段）：跳过判定，保证整轮要么全发要么全回退。
+            if check_queue and self._queue_max_position > 0:
                 pos = resp.headers.get("X-Queue-Position")
                 if pos is not None:
                     try:
