@@ -60,6 +60,15 @@ class CosyVoiceServerError(Exception):
     """
 
 
+class QueueFullError(Exception):
+    """语音服务器繁忙（排队位置超过阈值）。
+
+    仅当中转站/队列版服务端返回 ``X-Queue-Position`` 响应头且排队位置 >= 配置
+    阈值（tts_queue_max_position）时抛出。语义是「服务器在线但此刻排队长」，
+    应由上层提前放弃本次合成、回退文字，而不是一直等到超时。
+    """
+
+
 class CosyVoiceClient:
     def __init__(
         self,
@@ -69,6 +78,7 @@ class CosyVoiceClient:
         cache_dir: str = "",
         max_retry: int = 0,
         retry_backoff: float = 0.5,
+        queue_max_position: int = 0,
     ):
         self.base_url = base_url.rstrip("/")
         self.sample_rate = sample_rate
@@ -81,6 +91,10 @@ class CosyVoiceClient:
         self._http_timeout = httpx.Timeout(timeout, connect=10.0)
         self._max_retry = max_retry  # 退避重试次数；0=不重试（一次失败直接抛，由插件进冷却+回退文字）
         self._retry_backoff = retry_backoff  # 退避基数（秒）：实际等待 = base * 2**attempt
+        # 排队阈值：服务端返回 X-Queue-Position（前方排队任务数，首个为 0）且
+        # 排队位置 >= 此值时判定「服务器繁忙」，提前放弃（抛 QueueFullError）。
+        # 0 = 不限制（排队再长也照常等待）。直连 CosyVoice 无该头，天然不受影响。
+        self._queue_max_position = int(queue_max_position or 0)
         self.cache_dir = cache_dir
         self._sr_fetched = False
         # 复用单一 httpx 客户端（含连接池）：避免每次请求创建/销毁 AsyncClient。
@@ -191,6 +205,28 @@ class CosyVoiceClient:
                 raise
             # HTTP 状态码：区分「可重试」与「致命」。
             code = resp.status_code
+
+            # 中转站语义：响应头 X-Queue-Position 表示前方排队任务数（首个任务为 0）。
+            # 仅当服务端返回该头时生效；直连 CosyVoice 无此头，完全不受影响。
+            # 排队位置 >= 阈值（tts_queue_max_position）时判定「服务器繁忙」，
+            # 立即抛 QueueFullError 由上层回退文字，避免傻等（ReadTimeout）与重试验崩。
+            if self._queue_max_position > 0:
+                pos = resp.headers.get("X-Queue-Position")
+                if pos is not None:
+                    try:
+                        pos_int = int(pos)
+                    except (TypeError, ValueError):
+                        pos_int = -1
+                    if pos_int >= self._queue_max_position:
+                        logger.warning(
+                            f"[cosyvoice] 语音服务器繁忙（排队位置 {pos_int} >= 阈值 "
+                            f"{self._queue_max_position}），提前放弃本次合成"
+                        )
+                        raise QueueFullError(
+                            f"语音服务器繁忙（排队位置 {pos_int} 超过阈值 "
+                            f"{self._queue_max_position}）"
+                        )
+
             if 200 <= code < 300:
                 pcm = resp.content
                 break

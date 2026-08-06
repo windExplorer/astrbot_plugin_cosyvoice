@@ -20,7 +20,7 @@ import time
 
 from astrbot.api import logger
 
-from .client import CosyVoiceClient, CosyVoiceServerError
+from .client import CosyVoiceClient, CosyVoiceServerError, QueueFullError
 
 
 class CosyVoiceRouter:
@@ -40,6 +40,7 @@ class CosyVoiceRouter:
         max_retry: int = 0,
         retry_backoff: float = 0.5,
         fallback_url: str = "",
+        queue_max_position: int = 0,
     ):
         """初始化路由客户端。
 
@@ -51,6 +52,8 @@ class CosyVoiceRouter:
         self.cache_dir = cache_dir
         self._max_retry = max_retry
         self._retry_backoff = retry_backoff
+        # 排队阈值（传给各节点 client）：服务端返回 X-Queue-Position 且超过阈值即判繁忙
+        self._queue_max_position = int(queue_max_position or 0)
         self._fallback_url = (fallback_url or "").strip().rstrip("/")
         # 解析并构建节点
         self._nodes: list[dict] = []
@@ -103,6 +106,7 @@ class CosyVoiceRouter:
                 cache_dir=self.cache_dir,
                 max_retry=self._max_retry,
                 retry_backoff=self._retry_backoff,
+                queue_max_position=self._queue_max_position,
             )
             nodes.append(
                 {
@@ -128,8 +132,14 @@ class CosyVoiceRouter:
             + (f" | 默认节点: {defaults}" if defaults else "")
         )
 
-    def update_servers(self, servers: list[dict] | None, sample_rate: int = 24000):
+    def update_servers(
+        self,
+        servers: list[dict] | None,
+        sample_rate: int = 24000,
+        queue_max_position: int = 0,
+    ):
         """配置热更新：重建节点（保持原有分流逻辑）。"""
+        self._queue_max_position = int(queue_max_position or 0)
         self._rebuild(servers, sample_rate)
 
     # ---------- 分流选择 ----------
@@ -203,6 +213,14 @@ class CosyVoiceRouter:
                     f"[cosyvoice] 节点 {node['url']} 失联: {e}，尝试下一节点"
                 )
                 self._mark_failure(idx)
+            except QueueFullError as e:
+                # 该节点繁忙（排队过长）：不算故障、不隔离（避免误熔断），
+                # 直接尝试下一节点；全部节点都繁忙时，最后抛出原始 QueueFullError
+                # 交由插件层回退文字。
+                last_err = e
+                logger.warning(
+                    f"[cosyvoice] 节点 {node['url']} 繁忙（排队过长）: {e}，尝试下一节点"
+                )
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 logger.warning(

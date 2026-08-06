@@ -8,7 +8,7 @@ import asyncio
 
 from astrbot.api import logger
 
-from ..cosyvoice.client import CosyVoiceClient, CosyVoiceServerError
+from ..cosyvoice.client import CosyVoiceClient, CosyVoiceServerError, QueueFullError
 from ..utils import audio
 
 # 插件根目录（core/ 的上一级），用于解析相对参考音频路径
@@ -430,6 +430,10 @@ class TtsEngine:
         except CosyVoiceServerError:
             # 服务器失联是「环境故障」而非「内容问题」，向上抛给调用方给出专门提示
             raise
+        except QueueFullError:
+            # 服务器繁忙（排队过长）：与失联同属「环境暂不可用」，同样向上抛，
+            # 由插件层给出「繁忙稍后再试」的专门提示，而不是按普通失败吞掉
+            raise
         except Exception as e:  # noqa: BLE001
             logger.error(f"[cosyvoice] 语音合成失败: {e}")
             return None
@@ -462,6 +466,10 @@ class TtsEngine:
                 async with self._sem:
                     pcm = await self.client.synthesize(ch, mode="zero_shot", **kwargs)
             except CosyVoiceServerError:
+                raise
+            except QueueFullError:
+                # 繁忙（排队过长）同样视为「环境暂不可用」，中断逐段循环向上抛，
+                # 避免后面每段都白等一次排队、拖到超时
                 raise
             except Exception as e:  # noqa: BLE001
                 logger.error(f"[cosyvoice] 单段合成失败已跳过: {e}")

@@ -2,6 +2,16 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v1.14.0 (2026-08-07)
+
+- 适配中转站/队列版服务端：排队过长时「提前放弃」并回退文字，不再傻等超时。
+  - 新增配置项 `tts_queue_max_position`（默认 **8**，`0`=不限制）：服务端返回 `X-Queue-Position` 响应头且排队位置 ≥ 阈值时，判定「语音服务器繁忙」，立即放弃本次合成（抛 `QueueFullError`）、回退文字并进入冷却，而不是一直等到 ReadTimeout/重试验崩。
+  - **零侵入兼容**：仅当服务端带 `X-Queue-Position` 头时该逻辑生效；直连 CosyVoice（无该头）完全走原有逻辑，行为不变。
+  - `cosyvoice/client.py`：新增 `QueueFullError`；`synthesize` 在读响应头时校验排队位置。
+  - `cosyvoice/router.py`：排队阈值下发到各节点；繁忙节点**不算故障、不隔离**，仅切换下一节点（全部繁忙才回退）。
+  - `core/tts_engine.py`：`QueueFullError` 与 `CosyVoiceServerError` 一样向上抛，不被「单段失败跳过/返回 None」吞掉。
+  - `main.py`：三条合成路径（后台自动语音 `/tts` 指令、`text_to_speech` 工具）均捕获 `QueueFullError`，新增繁忙提示 `SERVER_BUSY_TIP`（「语音服务器正忙…稍后再试」），与失联提示区分文案。
+
 ## v1.13.0 (2026-08-05)
 
 - 优化多服务器配置：标题缩短（`base_url`→「单机服务地址」，`servers`→「服务端列表」），避免面板截断。

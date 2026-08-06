@@ -72,6 +72,13 @@
     "hint": "默认 150。队列版服务端单次推理可能 >30s 且入队最多等 30s，故必须 > 服务端 INFER_TIMEOUT(120)+COSY_QUEUE_WAIT(30)；若压太小会自己先超时断连、制造重试验崩。普通文本 60 也够，但配队列版建议保持 150。",
     "default": 150
   },
+  "tts_queue_max_position": {
+    "type": "int",
+    "title": "排队阈值（繁忙判定）",
+    "description": "服务端返回 X-Queue-Position 且排队位置 ≥ 此值时，判定语音服务器繁忙，直接回退文字",
+    "hint": "默认 8。仅当服务端带 X-Queue-Position 响应头（中转站/队列版服务）时生效；直连 CosyVoice 无此头则完全不受影响、不触发繁忙判定。0=不限制（排队再长也照常等待）。命中繁忙判定时会提前放弃本次合成、回退文字并进入冷却，而不是一直等到超时。",
+    "default": 8
+  },
   "default_voice": {
     "type": "string",
     "title": "默认音色",

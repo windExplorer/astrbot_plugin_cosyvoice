@@ -29,7 +29,7 @@ except Exception:  # noqa: BLE001
     LLMResponse = object  # type: ignore
 
 from .core.tts_engine import TtsEngine, is_speakable
-from .cosyvoice.client import CosyVoiceClient, CosyVoiceServerError
+from .cosyvoice.client import CosyVoiceClient, CosyVoiceServerError, QueueFullError
 from .cosyvoice.router import CosyVoiceRouter
 from .utils import audio
 
@@ -37,6 +37,8 @@ PLUGIN_ID = "astrbot_plugin_cosyvoice"
 
 # 语音服务器连不上时统一给用户的提示（大模型也需要能看懂这是服务器故障）
 SERVER_DOWN_TIP = "\n\n🎙️（语音服务器失联了，可以稍后再试或联系管理员，文字照常发送）"
+# 语音服务器繁忙（排队位置超过阈值 tts_queue_max_position）时给用户的提示
+SERVER_BUSY_TIP = "\n\n🎙️（语音服务器正忙，排队的消息有点多，可以稍后再试，文字照常发送）"
 
 
 @register(PLUGIN_ID, "Yours", "接入本地 CosyVoice3，让机器人以可配置音色朗读回复", "1.0.0")
@@ -56,6 +58,7 @@ class CosyVoicePlugin(Star):
             timeout=int(self.config.get("timeout", 150)),
             max_retry=int(self.config.get("tts_max_retry", 0) or 0),
             retry_backoff=float(self.config.get("tts_retry_backoff", 0.5) or 0.5),
+            queue_max_position=int(self.config.get("tts_queue_max_position", 8) or 0),
         )
         self._cooldown_sec = float(self.config.get("tts_cooldown_sec", 30))
         self.engine = TtsEngine(
@@ -156,11 +159,15 @@ class CosyVoicePlugin(Star):
         """
         self._server_cooldown_until = time.time() + getattr(self, "_cooldown_sec", 30.0)
 
-    async def _enter_cooldown(self, event: AstrMessageEvent, send_mode: str, full_text: str):
-        """合成失败：进冷却 + 发一次性失联提示 + 回退文字（voice_only 才需补发文字）。
+    async def _enter_cooldown(
+        self, event: AstrMessageEvent, send_mode: str, full_text: str,
+        tip: str = SERVER_DOWN_TIP,
+    ):
+        """合成失败：进冷却 + 发一次性提示 + 回退文字（voice_only 才需补发文字）。
 
         - 冷却期内本插件不再向服务端发任何请求（on_decorating_result 直接走回退分支）。
-        - 首次进入冷却时主动发一条 SERVER_DOWN_TIP 提示（用 context.send_message，平台已支持）。
+        - 首次进入冷却时主动发一条 tip 提示（用 context.send_message，平台已支持）。
+          默认提示为失联文案（SERVER_DOWN_TIP）；繁忙（排队过长）场景传入 SERVER_BUSY_TIP。
         - send_mode == "voice_only" 时把文字补发回去，避免前端静默；both 文字已在结果链，跳过。
         """
         self._trip_breaker()
@@ -168,7 +175,7 @@ class CosyVoicePlugin(Star):
             self._server_down = True
             try:
                 await self.context.send_message(
-                    event.unified_msg_origin, event.chain_result([Comp.Plain(SERVER_DOWN_TIP)])
+                    event.unified_msg_origin, event.chain_result([Comp.Plain(tip)])
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[cosyvoice] 失联提示发送失败: {e}")
@@ -250,7 +257,12 @@ class CosyVoicePlugin(Star):
         """
         servers = merged.get("servers") or []
         fallback = (merged.get("base_url") or "http://127.0.0.1:50002").strip().rstrip("/")
-        sig = repr(sorted(servers, key=lambda s: str(s.get("url")))) + "|" + fallback
+        qmp = int(merged.get("tts_queue_max_position", 8) or 0)
+        sig = (
+            repr(sorted(servers, key=lambda s: str(s.get("url"))))
+            + "|" + fallback
+            + "|qmp=" + str(qmp)
+        )
         if getattr(self, "_server_sig", None) == sig:
             return
         self._server_sig = sig
@@ -260,6 +272,7 @@ class CosyVoicePlugin(Star):
                 self.client.update_servers(
                     servers,
                     sample_rate=int(merged.get("sample_rate", 24000)),
+                    queue_max_position=qmp,
                 )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[cosyvoice] 更新服务端节点失败: {e}")
@@ -538,6 +551,10 @@ class CosyVoicePlugin(Star):
             if bucket and len(bucket) > 20:
                 self._decorated[origin] = set(list(bucket)[-20:])
             logger.info("[cosyvoice] 后台语音合成完成，已补发")
+        except QueueFullError:
+            # 排队过长：服务端在线但繁忙，进冷却避免反复打繁忙服务器，提示稍后再试
+            logger.warning("[cosyvoice] 语音服务器繁忙（排队过长），进入冷却并回退文字")
+            await self._enter_cooldown(event, send_mode, full_text, tip=SERVER_BUSY_TIP)
         except CosyVoiceServerError:
             logger.warning("[cosyvoice] 语音服务器失联，进入冷却并回退文字")
             await self._enter_cooldown(event, send_mode, full_text)
@@ -606,6 +623,12 @@ class CosyVoicePlugin(Star):
                     audio.schedule_cleanup(wav)
                 if not sent:
                     yield event.plain_result("哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？")
+        except QueueFullError:
+            # 排队过长：服务端在线但繁忙，进冷却避免反复打繁忙服务器，提示稍后再试
+            self._trip_breaker([])
+            logger.warning("[cosyvoice] /tts 服务器繁忙（排队过长），进入冷却")
+            yield event.plain_result(SERVER_BUSY_TIP)
+            return
         except CosyVoiceServerError:
             self._trip_breaker([])
             yield event.plain_result(SERVER_DOWN_TIP)
@@ -812,6 +835,12 @@ class CosyVoicePlugin(Star):
                     return "语音合成失败，已告知用户。"
             self._mark_server_ok()
             return "已用语音朗读，语音已发送给用户。"
+        except QueueFullError:
+            # 排队过长：服务端在线但繁忙，进冷却避免反复打繁忙服务器，提示稍后再试
+            self._trip_breaker()
+            logger.warning("[cosyvoice] text_to_speech 服务器繁忙（排队过长），进入冷却")
+            await self._realtime_send(event, [Comp.Plain(SERVER_BUSY_TIP)])
+            return "语音服务器繁忙（排队过长），已用文字告知用户。"
         except CosyVoiceServerError:
             self._trip_breaker()
             logger.warning("[cosyvoice] text_to_speech 服务器失联，进入冷却")
