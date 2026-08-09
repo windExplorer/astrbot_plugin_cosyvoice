@@ -691,7 +691,63 @@ class CosyVoicePlugin(Star):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[cosyvoice] 失败兜底补发文字也失败: {e}")
 
-    # ---------- 用户指令：/tts <文本> ----------
+    # ---------- 用户指令：/tts、/tts0、/tts1（均只发语音，不随 send_mode 发文字） ----------
+    async def _iter_cmd_audio(self, text: str, voice, mode: str = "default"):
+        """按指令模式逐条产出 wav 路径（异常向上抛，由指令层统一提示）：
+
+        - ``whole``：整段一次合成、发一条语音（内部仍会切段拼接防超长）；
+        - ``newline``：按换行符分块，每块一条语音；
+        - ``default``：按配置 segment_merge（合并成一条 / 分段逐条）。
+        """
+        if mode == "whole":
+            path = await self.engine.synthesize(text, voice)
+            if path:
+                yield path
+            return
+        if mode == "newline":
+            blocks = [b.strip() for b in re.split(r"\n+", text) if b.strip()]
+            for block in blocks:
+                path = await self.engine.synthesize(block, voice)
+                if path:
+                    yield path
+            return
+        # default：按配置
+        if self.config.get("segment_merge", False):
+            path = await self.engine.synthesize(text, voice)
+            if path:
+                yield path
+        else:
+            async for wav in self.engine.iter_segment_wavs(text, voice):
+                yield wav
+
+    async def _tts_cmd_impl(self, event: AstrMessageEvent, text: str, mode: str, empty_hint: str):
+        """指令类合成公共逻辑：只发语音（不随 send_mode 发文字）；失败按失联/繁忙/偶发分别提示。"""
+        # 服务端熔断冷却期内，直接提示，不再去打已坏的服务端
+        if self._server_cooldown_until and time.time() < self._server_cooldown_until:
+            yield event.plain_result(SERVER_DOWN_TIP)
+            return
+        self._set_flag(event, "suppress", True)
+        sent = False
+        try:
+            async for wav in self._iter_cmd_audio(text, self._session_voice(event), mode):
+                sent = True
+                yield event.chain_result([Comp.Record(file=wav, url=wav)])
+                audio.schedule_cleanup(wav)
+            if not sent:
+                yield event.plain_result(empty_hint)
+        except QueueFullError:
+            # 排队过长：服务端在线但繁忙，进冷却避免反复打繁忙服务器，提示稍后再试
+            self._trip_breaker([])
+            logger.warning("[cosyvoice] 指令合成服务器繁忙（排队过长），进入冷却")
+            yield event.plain_result(SERVER_BUSY_TIP)
+        except CosyVoiceServerError:
+            self._trip_breaker([])
+            yield event.plain_result(SERVER_DOWN_TIP)
+        except Exception as e:
+            # 偶发错误（如连接中途断开）不进熔断，仅提示本条失败，可重试
+            logger.warning(f"[cosyvoice] 指令合成失败（本条跳过）: {e}")
+            yield event.plain_result(empty_hint)
+
     @filter.command("tts")
     async def tts_cmd(self, event: AstrMessageEvent):
         self._refresh_cfg()
@@ -701,53 +757,38 @@ class CosyVoicePlugin(Star):
         if not text:
             yield event.plain_result("试试这样：/tts 后面跟上你想让我念的话～")
             return
+        async for res in self._tts_cmd_impl(
+            event, text, "default", "哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？"
+        ):
+            yield res
 
-        # 服务端熔断冷却期内，直接提示，不再去打已坏的服务端
-        if self._server_cooldown_until and time.time() < self._server_cooldown_until:
-            yield event.plain_result(SERVER_DOWN_TIP)
+    @filter.command("tts0")
+    async def tts0_cmd(self, event: AstrMessageEvent):
+        """/tts0 文本：整段一次合成、一口气念完（发一条语音，不分段发多条）。"""
+        self._refresh_cfg()
+        raw = (event.message_str or "").strip()
+        text = re.sub(r"^[/\s@]*tts0\b\s*", "", raw, flags=re.IGNORECASE).strip()
+        if not text:
+            yield event.plain_result("试试这样：/tts0 后面跟上文本，我会一口气念完（发一条语音）～")
             return
+        async for res in self._tts_cmd_impl(
+            event, text, "whole", "哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？"
+        ):
+            yield res
 
-        self._set_flag(event, "suppress", True)
-        # 发送方式：本会话单独设置优先（/tts_type），否则跟随全局 send_mode
-        send_mode = self._effective_send_mode(event, self.config)
-        merge = bool(self.config.get("segment_merge", False))
-        try:
-            if merge:
-                path = await self.engine.synthesize(text, self._session_voice(event))
-                if not path:
-                    yield event.plain_result("哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？")
-                    return
-                if send_mode == "both":
-                    yield event.chain_result([Comp.Plain(text), Comp.Record(file=path, url=path)])
-                else:
-                    yield event.chain_result([Comp.Record(file=path, url=path)])
-                audio.schedule_cleanup(path)
-            else:
-                # 不合并：边合成边逐段 yield（每段独立一条消息，服务端返回一段即发一段）
-                if send_mode == "both":
-                    yield event.plain_result(text)
-                sent = False
-                async for wav in self.engine.iter_segment_wavs(text, self._session_voice(event)):
-                    sent = True
-                    yield event.chain_result([Comp.Record(file=wav, url=wav)])
-                    audio.schedule_cleanup(wav)
-                if not sent:
-                    yield event.plain_result("哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？")
-        except QueueFullError:
-            # 排队过长：服务端在线但繁忙，进冷却避免反复打繁忙服务器，提示稍后再试
-            self._trip_breaker([])
-            logger.warning("[cosyvoice] /tts 服务器繁忙（排队过长），进入冷却")
-            yield event.plain_result(SERVER_BUSY_TIP)
+    @filter.command("tts1")
+    async def tts1_cmd(self, event: AstrMessageEvent):
+        """/tts1 文本：按换行符分段，每段一条语音逐条念（只发语音）。"""
+        self._refresh_cfg()
+        raw = (event.message_str or "").strip()
+        text = re.sub(r"^[/\s@]*tts1\b\s*", "", raw, flags=re.IGNORECASE).strip()
+        if not text:
+            yield event.plain_result("试试这样：/tts1 后面跟上多行文本，我会按换行逐段念～")
             return
-        except CosyVoiceServerError:
-            self._trip_breaker([])
-            yield event.plain_result(SERVER_DOWN_TIP)
-            return
-        except Exception as e:
-            # 偶发错误（如连接中途断开）不进熔断，仅提示本条失败，可重试
-            logger.warning(f"[cosyvoice] /tts 合成失败（本条跳过）: {e}")
-            yield event.plain_result("哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？")
-            return
+        async for res in self._tts_cmd_impl(
+            event, text, "newline", "哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？"
+        ):
+            yield res
 
     # ---------- 用户指令：/tts_voice <音色名> ----------
     @filter.command("tts_voice")
@@ -910,7 +951,9 @@ class CosyVoicePlugin(Star):
         self._refresh_cfg()
         lines = [
             "CosyVoice 语音 · 常用指令",
-            "/tts 文本 —— 让我把这句话念出来",
+            "/tts 文本 —— 让我把这句话念出来（按配置分段）",
+            "/tts0 文本 —— 一口气念完，只发一条语音（不分段）",
+            "/tts1 文本 —— 按换行符分段逐条念（每条语音对应一行）",
             "/tts_on [/tts_off] —— 开启/关闭本聊天自动语音（可加概率，如 /tts_on 0.8）",
             "/tts_type -1|0|1 —— 本聊天发送方式：-1 跟随全局 / 0 仅语音 / 1 语音+文字",
             "/tts_voice 名字 —— 切换本聊天音色（不带参数可查看可选音色）",
@@ -986,8 +1029,6 @@ class CosyVoicePlugin(Star):
                 return "用户没有提供要朗读的文本，请让用户先给出具体内容。"
 
         target_voice = voice or self._session_voice(event)
-        # 发送方式：本会话单独设置优先（/tts_type），否则跟随全局 send_mode
-        send_mode = self._effective_send_mode(event, self.config)
         merge = bool(self.config.get("segment_merge", False))
         try:
             if merge:
@@ -996,14 +1037,10 @@ class CosyVoicePlugin(Star):
                     await self._realtime_send(event, [Comp.Plain("话到嘴边卡壳了，这次没念出来，待会儿再试试？")])
                     return "语音合成失败，已告知用户。"
                 audio.schedule_cleanup(path)
-                if send_mode == "both":
-                    await self._realtime_send(event, [Comp.Plain(text), Comp.Record(file=path, url=path)])
-                else:
-                    await self._realtime_send(event, [Comp.Record(file=path, url=path)])
+                # 只发语音，不随 send_mode 发文字（文字由 LLM 结果链/历史保留）
+                await self._realtime_send(event, [Comp.Record(file=path, url=path)])
             else:
                 # 不合并：边合成边逐段主动发送（每段独立一条消息，服务端返回一段即发一段）
-                if send_mode == "both":
-                    await self._realtime_send(event, [Comp.Plain(text)])
                 sent = False
                 async for wav in self.engine.iter_segment_wavs(text.strip(), target_voice):
                     sent = True
