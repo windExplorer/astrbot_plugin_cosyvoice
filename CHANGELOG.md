@@ -2,6 +2,16 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v1.15.0 (2026-08-09)
+
+- 新增会话级发送方式 `/tts_type`：每个聊天可单独设置「语音发送方式」，不再受全局配置限制。
+  - `/tts_type -1` 跟随全局（默认，恢复全局 `send_mode`）；`/tts_type 0` 仅语音；`/tts_type 1` 语音+文字。
+  - 按会话持久记忆（`tts_sendmodes.json`），重启不丢；只影响当前聊天，其他会话不受影响。
+  - 生效点：后台自动语音、`/tts` 指令、`text_to_speech` 工具三条路径统一走 `_effective_send_mode`（会话优先、否则全局）。
+- 新增 `/tts_help` 指令：展示常用指令用法（`/tts`、`/tts_on|off`、`/tts_type`、`/tts_voice`、`/tts_status`、关键词触发），不展示 `/tts_export` 等管理员操作。
+- `/tts_status` 增加「发送方式」行：显示本聊天是「跟随全局 / 仅语音 / 语音+文字」以及全局当前值。
+- 顺手修复 `on_decorating_result` 冷却期分支在 `send_mode` 赋值前引用导致的潜在 `NameError`（该分支此前仅在服务端冷却期内可能触发）。
+
 ## v1.14.2 (2026-08-07)
 
 - 修复「语音服务器失联/繁忙」提示消息开头出现空白行：提示均为独立发送的消息（`_enter_cooldown` 主动推送、`/tts` 指令结果、`text_to_speech` 工具补发），前面并无正文，原有 `\n\n` 前导换行只剩副作用。去掉 `SERVER_DOWN_TIP` / `SERVER_BUSY_TIP` 的前导换行，消息从 🎙️ 直接开始。

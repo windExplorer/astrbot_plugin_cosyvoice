@@ -89,6 +89,10 @@ class CosyVoicePlugin(Star):
         # 会话级音色（按群/私聊持久记忆）：unified_msg_origin -> 音色名
         self._voice_file = os.path.join(data_dir, "tts_voices.json")
         self._voices = self._load_voices()
+        # 会话级发送方式（按群/私聊持久记忆）：unified_msg_origin -> "both"|"voice_only"
+        # 未设置 = 跟随全局 send_mode（配置项「语音发送方式」）
+        self._sendmode_file = os.path.join(data_dir, "tts_sendmodes.json")
+        self._sendmodes = self._load_sendmodes()
 
     def _data_dir(self) -> str:
         """持久数据目录。
@@ -234,6 +238,31 @@ class CosyVoicePlugin(Star):
 
     def _session_voice(self, event: AstrMessageEvent) -> str | None:
         return self._voices.get(event.unified_msg_origin)
+
+    # ---------- 会话级发送方式（按群持久记忆，/tts_type 设置） ----------
+    def _load_sendmodes(self) -> dict:
+        try:
+            with open(self._sendmode_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_sendmodes(self):
+        os.makedirs(os.path.dirname(self._sendmode_file), exist_ok=True)
+        with open(self._sendmode_file, "w", encoding="utf-8") as f:
+            json.dump(self._sendmodes, f, ensure_ascii=False, indent=2)
+
+    def _session_send_mode(self, event: AstrMessageEvent) -> str | None:
+        """本会话单独设置的发送方式：返回 "both"/"voice_only"；未设置返回 None（跟随全局）。"""
+        v = self._sendmodes.get(event.unified_msg_origin)
+        return v if v in ("both", "voice_only") else None
+
+    def _effective_send_mode(self, event: AstrMessageEvent, cfg: dict) -> str:
+        """实际生效的发送方式：会话单独设置（/tts_type）优先，否则取全局 send_mode。"""
+        v = self._session_send_mode(event)
+        if v is not None:
+            return v
+        return cfg.get("send_mode", "both")
 
     # ---------- 工具方法 ----------
     def _refresh_cfg(self) -> dict:
@@ -463,6 +492,11 @@ class CosyVoicePlugin(Star):
         if any(isinstance(c, Comp.Record) for c in chain):
             return
 
+        voice = self._get_flag(event, "voice", None) or self._session_voice(event)
+        # 发送方式：本会话单独设置优先（/tts_type），否则跟随全局 send_mode
+        send_mode = self._effective_send_mode(event, cfg)
+        merge = bool(cfg.get("segment_merge", False))
+
         # 服务端熔断冷却期：不再向服务端发任何请求，直接回退文字，避免一直卡着连文字也不发。
         # both 模式文字已在结果链会正常发出；voice_only 模式文字已被移除，需补发回去。
         if self._server_cooldown_until and time.time() < self._server_cooldown_until:
@@ -477,9 +511,6 @@ class CosyVoicePlugin(Star):
         if full_text in done:
             return
 
-        voice = self._get_flag(event, "voice", None) or self._session_voice(event)
-        send_mode = cfg.get("send_mode", "both")
-        merge = bool(cfg.get("segment_merge", False))
         voice_name, _, _ = self.engine.resolve_voice(voice)
 
         # voice_only：纯内存操作（很快、不阻塞），把原文从结果链移除，只让后台发语音；
@@ -601,7 +632,8 @@ class CosyVoicePlugin(Star):
             return
 
         self._set_flag(event, "suppress", True)
-        send_mode = self.config.get("send_mode", "both")
+        # 发送方式：本会话单独设置优先（/tts_type），否则跟随全局 send_mode
+        send_mode = self._effective_send_mode(event, self.config)
         merge = bool(self.config.get("segment_merge", False))
         try:
             if merge:
@@ -724,6 +756,46 @@ class CosyVoicePlugin(Star):
         else:
             yield event.plain_result("这个聊天本来就没开着自动语音呀～")
 
+    # ---------- 会话级发送方式：/tts_type -1|0|1 ----------
+    @filter.command("tts_type")
+    async def tts_type_cmd(self, event: AstrMessageEvent):
+        self._refresh_cfg()
+        origin = event.unified_msg_origin
+        raw = (event.message_str or "").strip()
+        # 去掉 /tts_type 命令前缀（兼容已剥离/未剥离与 @提及），取参数
+        arg = re.sub(r"^[/\s@]*tts_type\b\s*", "", raw, flags=re.IGNORECASE).strip()
+        m = re.fullmatch(r"(-1|0|1)", arg or "")
+        if not m:
+            yield event.plain_result(
+                "这个参数我没看懂～ 发送方式这样设：\n"
+                "/tts_type -1 跟随全局设置\n"
+                "/tts_type 0 只发语音（文字仍写入上下文）\n"
+                "/tts_type 1 语音+文字都发"
+            )
+            return
+        val = m.group(1)
+        gsm = self.config.get("send_mode", "both")
+        gsm_hint = "语音+文字" if gsm == "both" else "仅语音"
+        if val == "-1":
+            if self._sendmodes.pop(origin, None) is not None:
+                self._save_sendmodes()
+            yield event.plain_result(
+                f"好嘞，这个聊天恢复跟随全局设置了（当前全局是「{gsm_hint}」）。"
+            )
+        elif val == "0":
+            self._sendmodes[origin] = "voice_only"
+            self._save_sendmodes()
+            yield event.plain_result(
+                "好嘞，这个聊天以后只发语音～（文字仍会写入会话上下文，AI 不会失忆；"
+                "/tts_type -1 可恢复跟随全局）"
+            )
+        else:
+            self._sendmodes[origin] = "both"
+            self._save_sendmodes()
+            yield event.plain_result(
+                "好嘞，这个聊天以后语音+文字都发～（/tts_type 0 可改为只发语音）"
+            )
+
     # ---------- 查看当前聊天语音开关状态（不暴露敏感信息） ----------
     @filter.command("tts_status")
     async def tts_status_cmd(self, event: AstrMessageEvent):
@@ -738,10 +810,36 @@ class CosyVoicePlugin(Star):
             mode_hint = f"概率触发（约 {int(prob * 100)}% 发语音）🎲"
         session_voice = self._session_voice(event)
         default_voice = self.config.get("default_voice") or ""
+        # 发送方式：会话单独设置（/tts_type）优先，否则跟随全局
+        ssm = self._session_send_mode(event)
+        gsm = self.config.get("send_mode", "both")
+        gsm_hint = "语音+文字" if gsm == "both" else "仅语音"
+        if ssm is None:
+            sm_hint = f"跟随全局（{gsm_hint}）"
+        else:
+            sm_hint = ("语音+文字" if ssm == "both" else "仅语音") + f"（全局 {gsm_hint}）"
         lines = [
             f"自动语音开关：{mode_hint}",
             f"当前聊天音色：{session_voice or '（未单独设置）'}",
             f"全局默认音色：{default_voice or '（未配置）'}",
+            f"发送方式：{sm_hint}",
+        ]
+        yield event.plain_result("\n".join(lines))
+
+    # ---------- 使用帮助：/tts_help（只展示常用指令） ----------
+    @filter.command("tts_help")
+    async def tts_help_cmd(self, event: AstrMessageEvent):
+        self._refresh_cfg()
+        lines = [
+            "CosyVoice 语音 · 常用指令",
+            "/tts 文本 —— 让我把这句话念出来",
+            "/tts_on [/tts_off] —— 开启/关闭本聊天自动语音（可加概率，如 /tts_on 0.8）",
+            "/tts_type -1|0|1 —— 本聊天发送方式：-1 跟随全局 / 0 仅语音 / 1 语音+文字",
+            "/tts_voice 名字 —— 切换本聊天音色（不带参数可查看可选音色）",
+            "/tts_status —— 查看本聊天当前状态",
+            "",
+            "另外：回复里带「念出来 / 读出来」能触发本条语音；",
+            "带「用文字 / 别用语音」则本条只用文字回复。",
         ]
         yield event.plain_result("\n".join(lines))
 
@@ -810,7 +908,8 @@ class CosyVoicePlugin(Star):
                 return "用户没有提供要朗读的文本，请让用户先给出具体内容。"
 
         target_voice = voice or self._session_voice(event)
-        send_mode = self.config.get("send_mode", "both")
+        # 发送方式：本会话单独设置优先（/tts_type），否则跟随全局 send_mode
+        send_mode = self._effective_send_mode(event, self.config)
         merge = bool(self.config.get("segment_merge", False))
         try:
             if merge:
