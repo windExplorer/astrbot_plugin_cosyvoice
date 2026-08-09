@@ -113,6 +113,13 @@
             "title": "参考文本",
             "description": "音频对应原文（可选）",
             "hint": "服务端模式且服务端 voices.json 已存该文件名文本时可留空，服务端自动取；仅本端上传模式才需要填"
+          },
+          "hidden": {
+            "type": "bool",
+            "title": "隐藏",
+            "description": "是否从音色列表中隐藏",
+            "hint": "勾选后该音色不出现在 /tts_voice 列出的音色与 LLM 的 list_voices 中；知道名字仍可手动 /tts_voice 名字 使用",
+            "default": false
           }
         }
       }

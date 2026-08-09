@@ -115,7 +115,7 @@ class TtsEngine:
             logger.info(f"[cosyvoice] 已加载 {len(self.voices)} 个音色: {list(self.voices.keys())}")
 
     def _norm_voices(self, voices):
-        """把 str / dict / list 归一化为 { 音色名: {prompt_wav, prompt_text} }。"""
+        """把 str / dict / list 归一化为 { 音色名: {prompt_wav, prompt_text, hidden} }。"""
         if isinstance(voices, str):
             s = voices.strip()
             if not s or s in ("{}", "[]"):
@@ -132,6 +132,7 @@ class TtsEngine:
                     d[str(k)] = {
                         "prompt_wav": v.get("prompt_wav", "") or "",
                         "prompt_text": v.get("prompt_text", "") or "",
+                        "hidden": bool(v.get("hidden", False)),
                     }
         elif isinstance(voices, list):
             for item in voices:
@@ -143,11 +144,19 @@ class TtsEngine:
                 d[name] = {
                     "prompt_wav": item.get("prompt_wav", "") or "",
                     "prompt_text": item.get("prompt_text", "") or "",
+                    "hidden": bool(item.get("hidden", False)),
                 }
         return d
 
-    def list_voices(self) -> list:
-        return sorted(self.voices.keys())
+    def list_voices(self, include_hidden: bool = False) -> list:
+        """返回音色名列表；默认过滤隐藏音色（include_hidden=True 时返回全部）。
+
+        隐藏音色仅供管理员/已知名字者手动指定使用（如 /tts_voice 名字），
+        不出现在普通用户与 LLM 的音色列表中。
+        """
+        if include_hidden:
+            return sorted(self.voices.keys())
+        return sorted(k for k, v in self.voices.items() if not v.get("hidden"))
 
     def resolve_voice(self, voice_name: str | None = None):
         """返回 (音色名, prompt_wav, prompt_text)。找不到任何音色时返回 (None, None, None)。"""

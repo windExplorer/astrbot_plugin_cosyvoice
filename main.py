@@ -680,11 +680,13 @@ class CosyVoicePlugin(Star):
         raw = (event.message_str or "").strip()
         # 去掉 /tts_voice 命令前缀（同上，兼容已剥离/未剥离与 @提及）
         name = re.sub(r"^[/\s@]*tts_voice\b\s*", "", raw, flags=re.IGNORECASE).strip()
-        voices = self.engine.list_voices()
-        if not voices:
+        # 列表只展示非隐藏音色；切换校验用全部音色（隐藏音色知道名字仍可手动指定）
+        all_voices = self.engine.list_voices(include_hidden=True)
+        if not all_voices:
             yield event.plain_result("我还没拿到能用的嗓音，暂时开不了口～ 先给我安排一个音色吧。")
             return
-        if not name or name not in voices:
+        voices = self.engine.list_voices()
+        if not name or name not in all_voices:
             cur = self._session_voice(event)
             cur_hint = f"（当前聊天用的是「{cur}」）" if cur else ""
             yield event.plain_result(
@@ -989,8 +991,10 @@ class CosyVoicePlugin(Star):
         self._refresh_cfg()
         if not self.config.get("enable_llm_tool", True):
             return "语音功能还没开呢，先把它打开我就能换音色啦～"
+        # 校验用全部音色（隐藏音色知道名字也可设置）；提示列表只展示非隐藏
+        all_voices = self.engine.list_voices(include_hidden=True)
         voices = self.engine.list_voices()
-        if not name or name not in voices:
+        if not name or name not in all_voices:
             return f"没有「{name}」这个音色，可用音色有：{', '.join(voices)}"
         self._voices[event.unified_msg_origin] = name
         self._save_voices()
