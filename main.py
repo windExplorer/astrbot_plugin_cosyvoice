@@ -177,6 +177,9 @@ class CosyVoicePlugin(Star):
         - text_in_chain=False（文字已从结果链移除，如 voice_only / 不合并 both）时
           把文字补发回去，避免前端静默；True（合并 both 文字已在结果链）则跳过。
         """
+        logger.info(
+            f"[cosyvoice] 进入冷却 | send_mode={send_mode} text_in_chain={text_in_chain}"
+        )
         self._trip_breaker()
         if not self._server_down:
             self._server_down = True
@@ -381,37 +384,39 @@ class CosyVoicePlugin(Star):
             audio.schedule_cleanup(p)
         return recs
 
-    async def _realtime_send(self, event: AstrMessageEvent, records: list):
-        """后台补发一段语音：优先主动推送一条独立消息，让语音不依赖结果链、不被阻塞。
+    async def _realtime_send(self, event: AstrMessageEvent, records: list) -> bool:
+        """主动推送一条消息（文字段 / 语音段 / 组合），返回是否发送成功。
 
         发送顺序（取第一个可用且成功的）：
         1) event.send：部分平台/版本支持的事件级主动发送；
-        2) self.context.send_message(unified_msg_origin, chain)：AstrBot 官方主动消息 API，
-           通用性最好，但「某些平台可能不支持主动消息发送」。
+        2) self.context.send_message(unified_msg_origin, chain)：AstrBot 官方主动消息 API。
 
-        不再回退到 result.chain.extend：本插件语音在后台任务中发送，此时 on_decorating_result
-        早已 return、结果链已被 AstrBot 发出，extend 是无效操作且会静默丢语音；故不可用时
-        直接记 WARNING，由调用方决定是否影响（voice_only 下文字已由 LLM 历史兜底，不丢上下文）。
+        :return: True=发送成功；False=两条通道都失败（调用方可降级处理，如分开补发）。
+        注意：部分平台对「主动推送的组合消息（Plain+Record）」可能只展示语音、
+        静默丢弃文字，因此调用方应尽量用单组件消息（文字、语音分开发）。
         """
-        # 整体 try：任何异常（含 event.chain_result 构造、event.send、context.send_message）
-        # 都只记日志、不外抛——避免单段发送失败中断整个逐段循环导致后续段全丢。
+        types = [type(c).__name__ for c in records]
         try:
             chain = event.chain_result(records)
             send = getattr(event, "send", None)
             if callable(send):
                 try:
                     await send(chain)
-                    return
+                    logger.debug(f"[cosyvoice] event.send 发送成功 组件={types}")
+                    return True
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
-                        f"[cosyvoice] event.send 实时发送失败，尝试 context.send_message: {e}"
+                        f"[cosyvoice] event.send 实时发送失败（尝试 context.send_message）: {e}"
                     )
             await self.context.send_message(event.unified_msg_origin, chain)
+            logger.debug(f"[cosyvoice] context.send_message 发送成功 组件={types}")
+            return True
         except Exception as e:  # noqa: BLE001
             logger.warning(
-                f"[cosyvoice] 语音补发失败（平台可能不支持主动消息）: {e}"
-                f" | unified_msg_origin={event.unified_msg_origin}"
+                f"[cosyvoice] 主动推送失败（平台可能不支持主动消息）: {e}"
+                f" | 组件={types} | unified_msg_origin={event.unified_msg_origin}"
             )
+            return False
 
     # ---------- LLM 回复钩子：标记 + 关键词触发 ----------
     @filter.on_llm_response()
@@ -563,6 +568,10 @@ class CosyVoicePlugin(Star):
 
         失败则进入冷却 + 回退文字（见 _enter_cooldown）；冷却期内不再打服务端。
         """
+        logger.info(
+            f"[cosyvoice] 后台合成开始 | send_mode={send_mode} merge={merge} "
+            f"text_in_chain={text_in_chain} 文本长度={len(full_text)}字"
+        )
         try:
             if merge:
                 path = await self.engine.synthesize(full_text, voice)
@@ -576,22 +585,29 @@ class CosyVoicePlugin(Star):
                 await self._realtime_send(event, [Comp.Record(file=path, url=path)])
             else:
                 if send_mode == "both":
-                    # 逐段发「文字段+语音段」：文字跟随语音分段走，不一次性刷全文。
+                    # 逐段先发文字、再发语音（分两条单组件消息）：
+                    # 文字跟随语音分段走、不一次性刷全文；单组件消息平台兼容性最好，
+                    # 避免「组合消息被平台只展示语音、文字静默丢弃」。
                     success = 0
                     pending: list = []  # 合成失败的段：语音缺段但文字要补发
                     async for seg_text, wav in self.engine.iter_segment_items(full_text, voice):
                         if wav:
                             success += 1
                             audio.schedule_cleanup(wav)
-                            comps = [Comp.Plain(seg_text), Comp.Record(file=wav, url=wav)]
                         else:
+                            logger.warning(
+                                f"[cosyvoice] 段合成失败（仅补发文字）: \"{seg_text[:20]}...\""
+                            )
                             pending.append(seg_text)
                             continue
-                        try:
-                            await self._realtime_send(event, comps)
-                        except Exception as e:  # noqa: BLE001
-                            # 单段发送失败只跳过该段，不影响后续段继续发出
-                            logger.warning(f"[cosyvoice] 单段发送失败（跳过该段）: {e}")
+                        if not await self._realtime_send(event, [Comp.Plain(seg_text)]):
+                            logger.warning(
+                                f"[cosyvoice] 段文字发送失败（语音仍尝试）: \"{seg_text[:20]}...\""
+                            )
+                        if not await self._realtime_send(
+                            event, [Comp.Record(file=wav, url=wav)]
+                        ):
+                            logger.warning("[cosyvoice] 段语音发送失败（文字已发出）")
                     if success == 0:
                         # 全部段合成失败：进冷却，由回退逻辑补发完整文字
                         logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
@@ -602,10 +618,10 @@ class CosyVoicePlugin(Star):
                     if pending:
                         # 部分段合成失败：把失败段的文字补发，保证文字完整不缺段
                         for seg in pending:
-                            try:
-                                await self._realtime_send(event, [Comp.Plain(seg)])
-                            except Exception as e:  # noqa: BLE001
-                                logger.warning(f"[cosyvoice] 补发失败段文字失败: {e}")
+                            if not await self._realtime_send(event, [Comp.Plain(seg)]):
+                                logger.warning(
+                                    f"[cosyvoice] 补发失败段文字失败: \"{seg[:20]}...\""
+                                )
                 else:
                     # voice_only：只发语音段，文字由 LLM completion_text 存会话历史兜底
                     sent_any = False
@@ -664,6 +680,9 @@ class CosyVoicePlugin(Star):
             return
         if not full_text:
             return
+        logger.info(
+            f"[cosyvoice] 补发完整文字 | send_mode={send_mode} 长度={len(full_text)}字"
+        )
         try:
             await self.context.send_message(
                 event.unified_msg_origin, event.chain_result([Comp.Plain(full_text)])
