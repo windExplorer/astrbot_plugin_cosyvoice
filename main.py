@@ -167,14 +167,15 @@ class CosyVoicePlugin(Star):
 
     async def _enter_cooldown(
         self, event: AstrMessageEvent, send_mode: str, full_text: str,
-        tip: str = SERVER_DOWN_TIP,
+        tip: str = SERVER_DOWN_TIP, text_in_chain: bool = False,
     ):
-        """合成失败：进冷却 + 发一次性提示 + 回退文字（voice_only 才需补发文字）。
+        """合成失败：进冷却 + 发一次性提示 + 回退文字（文字已从结果链移除时才补发）。
 
         - 冷却期内本插件不再向服务端发任何请求（on_decorating_result 直接走回退分支）。
         - 首次进入冷却时主动发一条 tip 提示（用 context.send_message，平台已支持）。
           默认提示为失联文案（SERVER_DOWN_TIP）；繁忙（排队过长）场景传入 SERVER_BUSY_TIP。
-        - send_mode == "voice_only" 时把文字补发回去，避免前端静默；both 文字已在结果链，跳过。
+        - text_in_chain=False（文字已从结果链移除，如 voice_only / 不合并 both）时
+          把文字补发回去，避免前端静默；True（合并 both 文字已在结果链）则跳过。
         """
         self._trip_breaker()
         if not self._server_down:
@@ -185,7 +186,7 @@ class CosyVoicePlugin(Star):
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[cosyvoice] 失联提示发送失败: {e}")
-        await self._fallback_text(event, full_text, send_mode)
+        await self._fallback_text(event, full_text, send_mode, text_in_chain)
 
 
     # ---------- 会话级语音开关（按群持久记忆） ----------
@@ -496,12 +497,15 @@ class CosyVoicePlugin(Star):
         # 发送方式：本会话单独设置优先（/tts_type），否则跟随全局 send_mode
         send_mode = self._effective_send_mode(event, cfg)
         merge = bool(cfg.get("segment_merge", False))
+        # 文字是否保留在结果链：合并 both 模式保留（AstrBot 一次性发全文 + 整条语音）；
+        # voice_only 或 不合并 both 都从结果链移除，改由后台逐段发「文字段+语音段」。
+        text_in_chain = bool(send_mode == "both" and merge)
 
         # 服务端熔断冷却期：不再向服务端发任何请求，直接回退文字，避免一直卡着连文字也不发。
-        # both 模式文字已在结果链会正常发出；voice_only 模式文字已被移除，需补发回去。
+        # 文字在结果链（合并 both）会正常发出；已移除（voice_only / 不合并 both）需补发回去。
         if self._server_cooldown_until and time.time() < self._server_cooldown_until:
-            if send_mode == "voice_only":
-                await self._fallback_text(event, full_text, "voice_only")
+            if not text_in_chain:
+                await self._fallback_text(event, full_text, send_mode, text_in_chain)
             return
 
         # 本轮同一条消息若已成功合成过（框架可能重复触发 on_decorating_result），
@@ -513,22 +517,25 @@ class CosyVoicePlugin(Star):
 
         voice_name, _, _ = self.engine.resolve_voice(voice)
 
-        # voice_only：纯内存操作（很快、不阻塞），把原文从结果链移除，只让后台发语音；
-        # 文字已由 LLM completion_text 存入会话历史，不丢上下文。both 模式保留原文。
-        if send_mode == "voice_only":
+        # 从结果链移除原文（纯内存操作，很快、不阻塞）：voice_only 只后台发语音；
+        # 不合并 both 由后台逐段发「文字段+语音段」，文字跟随语音走、不一次性刷全文。
+        # 文字均已由 LLM completion_text 存入会话历史，不丢上下文；语音失败时 _fallback_text 兜底补发。
+        if not text_in_chain:
             result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
 
         logger.info(
-            f"[cosyvoice] 文字先发，语音转入后台合成 | 音色={voice_name} "
+            f"[cosyvoice] 语音转入后台合成 | 音色={voice_name} "
             f"总长度={len(full_text)}字 模式={'合并' if merge else '逐段发送'} "
-            f"send_mode={send_mode}"
+            f"send_mode={send_mode} text_in_chain={text_in_chain}"
         )
 
-        # 关键：本钩子【不 await 合成】，文字立刻交给 AstrBot 发出，避免占用事件循环、
-        # 卡住同一会话/全局的其他消息。语音合成放到后台任务，合成完再主动 event.send 补发。
+        # 关键：本钩子【不 await 合成】，文字立刻交给 AstrBot 发出（若保留在链上），避免占用
+        # 事件循环、卡住同一会话/全局的其他消息。语音合成放到后台任务，合成完再主动补发。
         # 这样「等一会儿」可接受，但绝不阻塞其他事件。
         task = asyncio.ensure_future(
-            self._background_speak(event, full_text, voice, send_mode, merge, origin)
+            self._background_speak(
+                event, full_text, voice, send_mode, merge, origin, text_in_chain
+            )
         )
         # 避免「未等待的 Task 异常」警告刷屏
         task.add_done_callback(self._log_task_exc)
@@ -544,39 +551,79 @@ class CosyVoicePlugin(Star):
 
     async def _background_speak(
         self, event: AstrMessageEvent, full_text: str,
-        voice, send_mode: str, merge: bool, origin: str,
+        voice, send_mode: str, merge: bool, origin: str, text_in_chain: bool = False,
     ):
-        """后台补发语音：不阻塞 on_decorating_result，文字已由 AstrBot 先发出。
+        """后台补发语音：不阻塞 on_decorating_result。
 
-        合成成功后主动 event.send 逐段/整段语音；失败则进入冷却 + 回退文字（见 _enter_cooldown），
-        冷却期内后续请求不再打服务端、直接回退，避免一直卡着连文字也不发。
-        结果链在钩子返回后已由 AstrBot 发送，此处不再改动结果链。
-        voice_only 模式下文字已从结果链移除，失败退化为补发文字，避免前端静默。
+        发送方式与文字归属：
+        - 合并 both：文字已在结果链（text_in_chain=True），只补发整条语音；
+        - 合并 voice_only：文字已移除，只补发整条语音，失败回退补发文字；
+        - 不合并 both：文字已移除，逐段发「文字段+语音段」，文字跟随语音走；
+        - 不合并 voice_only：文字已移除，逐段只发语音，失败回退补发文字。
+
+        失败则进入冷却 + 回退文字（见 _enter_cooldown）；冷却期内不再打服务端。
         """
         try:
             if merge:
                 path = await self.engine.synthesize(full_text, voice)
                 if not path:
                     logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
-                    await self._enter_cooldown(event, send_mode, full_text)
+                    await self._enter_cooldown(
+                        event, send_mode, full_text, text_in_chain=text_in_chain
+                    )
                     return
                 audio.schedule_cleanup(path)
                 await self._realtime_send(event, [Comp.Record(file=path, url=path)])
             else:
-                sent_any = False
-                async for wav in self.engine.iter_segment_wavs(full_text, voice):
-                    sent_any = True
-                    rec = Comp.Record(file=wav, url=wav)
-                    audio.schedule_cleanup(wav)
-                    try:
-                        await self._realtime_send(event, [rec])
-                    except Exception as e:  # noqa: BLE001
-                        # 单段发送失败只跳过该段，不影响后续段继续发出
-                        logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
-                if not sent_any:
-                    logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
-                    await self._enter_cooldown(event, send_mode, full_text)
-                    return
+                if send_mode == "both":
+                    # 逐段发「文字段+语音段」：文字跟随语音分段走，不一次性刷全文。
+                    success = 0
+                    pending: list = []  # 合成失败的段：语音缺段但文字要补发
+                    async for seg_text, wav in self.engine.iter_segment_items(full_text, voice):
+                        if wav:
+                            success += 1
+                            audio.schedule_cleanup(wav)
+                            comps = [Comp.Plain(seg_text), Comp.Record(file=wav, url=wav)]
+                        else:
+                            pending.append(seg_text)
+                            continue
+                        try:
+                            await self._realtime_send(event, comps)
+                        except Exception as e:  # noqa: BLE001
+                            # 单段发送失败只跳过该段，不影响后续段继续发出
+                            logger.warning(f"[cosyvoice] 单段发送失败（跳过该段）: {e}")
+                    if success == 0:
+                        # 全部段合成失败：进冷却，由回退逻辑补发完整文字
+                        logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
+                        await self._enter_cooldown(
+                            event, send_mode, full_text, text_in_chain=text_in_chain
+                        )
+                        return
+                    if pending:
+                        # 部分段合成失败：把失败段的文字补发，保证文字完整不缺段
+                        for seg in pending:
+                            try:
+                                await self._realtime_send(event, [Comp.Plain(seg)])
+                            except Exception as e:  # noqa: BLE001
+                                logger.warning(f"[cosyvoice] 补发失败段文字失败: {e}")
+                else:
+                    # voice_only：只发语音段，文字由 LLM completion_text 存会话历史兜底
+                    sent_any = False
+                    async for wav in self.engine.iter_segment_wavs(full_text, voice):
+                        sent_any = True
+                        rec = Comp.Record(file=wav, url=wav)
+                        audio.schedule_cleanup(wav)
+                        try:
+                            await self._realtime_send(event, [rec])
+                        except Exception as e:  # noqa: BLE001
+                            # 单段发送失败只跳过该段，不影响后续段继续发出
+                            logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
+                    if not sent_any:
+                        logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
+                        await self._enter_cooldown(
+                            event, send_mode, full_text, text_in_chain=text_in_chain
+                        )
+                        return
             # 整轮成功后才登记幂等 + 解除冷却
             self._mark_server_ok()
             self._decorated.setdefault(origin, set()).add(full_text)
@@ -587,23 +634,33 @@ class CosyVoicePlugin(Star):
         except QueueFullError:
             # 排队过长：服务端在线但繁忙，进冷却避免反复打繁忙服务器，提示稍后再试
             logger.warning("[cosyvoice] 语音服务器繁忙（排队过长），进入冷却并回退文字")
-            await self._enter_cooldown(event, send_mode, full_text, tip=SERVER_BUSY_TIP)
+            await self._enter_cooldown(
+                event, send_mode, full_text, tip=SERVER_BUSY_TIP, text_in_chain=text_in_chain
+            )
         except CosyVoiceServerError:
             logger.warning("[cosyvoice] 语音服务器失联，进入冷却并回退文字")
-            await self._enter_cooldown(event, send_mode, full_text)
+            await self._enter_cooldown(
+                event, send_mode, full_text, text_in_chain=text_in_chain
+            )
         except Exception as e:
             logger.warning(f"[cosyvoice] 后台语音合成失败（进入冷却并回退文字）: {e}")
-            await self._enter_cooldown(event, send_mode, full_text)
+            await self._enter_cooldown(
+                event, send_mode, full_text, text_in_chain=text_in_chain
+            )
 
-    async def _fallback_text(self, event: AstrMessageEvent, full_text: str, send_mode: str):
-        """语音彻底失败时，把文字补发回去，避免 voice_only 模式前端静默。
+    async def _fallback_text(
+        self, event: AstrMessageEvent, full_text: str, send_mode: str,
+        text_in_chain: bool = False,
+    ):
+        """语音彻底失败时，把文字补发回去，避免前端静默。
 
-        - both 模式：文字已在结果链由 AstrBot 正常发出，无需补发，直接返回。
-        - voice_only 模式：文字已从结果链移除，若语音失败则需主动把文字发出来，
-          让用户至少看得到（文字也由 LLM completion_text 存入会话历史，不丢上下文）。
+        - text_in_chain=True（合并 both）：文字已在结果链由 AstrBot 正常发出，无需补发。
+        - text_in_chain=False（voice_only / 不合并 both）：文字已从结果链移除，
+          若语音失败则需主动把文字发出来，让用户至少看得到
+          （文字也由 LLM completion_text 存入会话历史，不丢上下文）。
         使用 context.send_message（官方主动消息 API），你平台已确认支持。
         """
-        if send_mode != "voice_only":
+        if text_in_chain:
             return
         if not full_text:
             return
@@ -611,9 +668,9 @@ class CosyVoicePlugin(Star):
             await self.context.send_message(
                 event.unified_msg_origin, event.chain_result([Comp.Plain(full_text)])
             )
-            logger.info("[cosyvoice] voice_only 语音失败，已退化为补发文字")
+            logger.info("[cosyvoice] 语音失败，已退化为补发文字")
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"[cosyvoice] voice_only 失败兜底补发文字也失败: {e}")
+            logger.warning(f"[cosyvoice] 失败兜底补发文字也失败: {e}")
 
     # ---------- 用户指令：/tts <文本> ----------
     @filter.command("tts")

@@ -451,11 +451,14 @@ class TtsEngine:
             logger.error(f"[cosyvoice] 语音合成失败: {e}")
             return None
 
-    async def iter_segment_wavs(self, text: str, voice_name: str | None = None):
-        """逐段合成，依次 yield 每段生成的临时 wav 文件路径。
+    async def iter_segment_items(self, text: str, voice_name: str | None = None):
+        """逐段合成，依次 yield (段文字, wav路径或None)。
 
         用于「不合并」模式：每段生成完即可发给用户，无需等全部完成。
-        服务器失联（CosyVoiceServerError）会向上抛出；单段推理失败则跳过该段继续。
+        - 合成成功：yield (ch, wav路径)；
+        - 单段推理失败：yield (ch, None)，**文字仍返回**，由调用方保证文字不丢
+          （语音缺段但文字完整）。
+        服务器失联（CosyVoiceServerError）/ 繁忙（QueueFullError）会向上抛出。
         """
         name, prompt_wav, prompt_text = self.resolve_voice(voice_name)
         if name is None:
@@ -490,8 +493,20 @@ class TtsEngine:
                 raise
             except Exception as e:  # noqa: BLE001
                 logger.error(f"[cosyvoice] 单段合成失败已跳过: {e}")
+                yield ch, None
                 continue
             if pcm:
                 dt = (time.time() - t0) * 1000
                 logger.info(f"[cosyvoice] 合成 {i}/{total} OK | {dt:.0f}ms {len(pcm)}字节PCM")
-                yield audio.pcm_to_wav_file(pcm, self.client.sample_rate, self.client.cache_dir)
+                yield ch, audio.pcm_to_wav_file(pcm, self.client.sample_rate, self.client.cache_dir)
+            else:
+                yield ch, None
+
+    async def iter_segment_wavs(self, text: str, voice_name: str | None = None):
+        """逐段合成，依次 yield 每段生成的临时 wav 文件路径（忽略失败段）。
+
+        用于「不合并」模式下只需语音、无需逐段文字的路径（voice_only / 手动指令）。
+        """
+        async for _ch, wav in self.iter_segment_items(text, voice_name):
+            if wav:
+                yield wav
