@@ -28,7 +28,7 @@ try:  # 仅用于类型标注，缺失也不影响运行
 except Exception:  # noqa: BLE001
     LLMResponse = object  # type: ignore
 
-from .core.tts_engine import TtsEngine, is_speakable
+from .core.tts_engine import TtsEngine, is_speakable, clean_media_placeholders
 from .cosyvoice.client import CosyVoiceClient, CosyVoiceServerError, QueueFullError
 from .cosyvoice.router import CosyVoiceRouter
 from .utils import audio
@@ -433,13 +433,14 @@ class CosyVoicePlugin(Star):
         resp_text = getattr(resp, "completion_text", None) or getattr(resp, "text", "") or ""
         if isinstance(resp_text, list):
             resp_text = "".join(str(x) for x in resp_text)
-        self._last_llm[event.unified_msg_origin] = resp_text
+        # 存入时即剔除媒体占位符标签，避免后续回退合成时念出 <pc_history_media .../> 之类
+        self._last_llm[event.unified_msg_origin] = clean_media_placeholders(resp_text)
 
         cfg = self.config
 
-        # 关键词触发
+        # 关键词触发（先剔除媒体占位符标签，避免 <pc_history_media images="1" /> 之类干扰判定）
         if cfg.get("enable_user_trigger", True):
-            msg = event.message_str or ""
+            msg = clean_media_placeholders(event.message_str or "")
             # 跨钩子保存用户原消息，供 _should_tts 的 text_keywords 抑制判定兜底使用
             if msg:
                 self._last_user_msg[event.unified_msg_origin] = msg
@@ -478,16 +479,17 @@ class CosyVoicePlugin(Star):
         if not chain:
             return
 
-        # 抽取纯文本
+        # 抽取纯文本（先剔除媒体占位符标签，如 <pc_history_media images="1" />，
+        # 避免把图片/历史媒体占位当正文朗读或显示）
         texts = [
-            getattr(c, "text", "")
+            clean_media_placeholders(getattr(c, "text", ""))
             for c in chain
             if isinstance(c, Comp.Plain) and getattr(c, "text", "")
         ]
         full_text = "".join(texts).strip()
         if not is_speakable(full_text):
-            # 结果链文本无效（空 / [] 占位符等）：回退用本轮模型原文合成
-            fb = self._last_llm.get(event.unified_msg_origin, "")
+            # 结果链文本无效（空 / [] 占位符等）：回退用本轮模型原文合成（同样净化）
+            fb = clean_media_placeholders(self._last_llm.get(event.unified_msg_origin, ""))
             if is_speakable(fb):
                 logger.debug("[cosyvoice] 结果链文本无效，回退使用本轮模型原文合成语音")
                 full_text = fb
@@ -1022,11 +1024,12 @@ class CosyVoicePlugin(Star):
 
         if not is_speakable(text):
             # 模型可能没把正文放进 text 参数（如传入 [] 占位符），回退用本轮模型原文
-            fb = self._last_llm.get(event.unified_msg_origin, "")
+            fb = clean_media_placeholders(self._last_llm.get(event.unified_msg_origin, ""))
             if is_speakable(fb):
                 text = fb
             else:
                 return "用户没有提供要朗读的文本，请让用户先给出具体内容。"
+        text = clean_media_placeholders(text)
 
         target_voice = voice or self._session_voice(event)
         merge = bool(self.config.get("segment_merge", False))
