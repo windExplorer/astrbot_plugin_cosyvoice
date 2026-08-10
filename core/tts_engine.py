@@ -26,6 +26,61 @@ VOICES_DIR = os.path.join(_PLUGIN_ROOT, "voices")
 #   2) 含 media/image/img/record 关键词的尖括号标签。
 _SELF_CLOSE_TAG_RE = re.compile(r"<[a-zA-Z_][^<>]*?/>", re.S)
 _MEDIA_KEY_TAG_RE = re.compile(r"<[^<>]*(?:media|image|img|record)[^<>]*>", re.I)
+# AstrBot 工具调用序列化：标识符（工具名）紧接一个 JSON 对象，且对象以 "name" 键开头，
+# 如 comfyui_draw{"name":"comfyui_draw","args":{...}}。在 tool_loop 最终响应的
+# completion_text 里会混入这类内容，必须完整剔除（否则被当正文朗读/显示）。
+_LLM_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+
+
+def _looks_like_tool_call(text: str, start: int) -> int:
+    """从 start 处判断是否形如 `工具名{...}` 的工具调用；是则返回配对大括号后的下标，否则返回 -1。
+
+    要求：标识符 + 可选空白 + `{`，且 `{` 后（跳空白）以 `"name"` 键开头。
+    用大括号配对定位整个 JSON 块，避免 JSON 内标点被分段器切碎后残留。
+    """
+    m = _LLM_IDENT_RE.match(text, start)
+    if not m:
+        return -1
+    j = m.end()
+    k = j
+    n = len(text)
+    while k < n and text[k] in " \t\n\r":
+        k += 1
+    if k >= n or text[k] != "{":
+        return -1
+    probe = k + 1
+    while probe < n and text[probe] in " \t\n\r":
+        probe += 1
+    if text[probe : probe + 6].lower() != '"name"':
+        return -1
+    depth = 0
+    p = k
+    while p < n:
+        if text[p] == "{":
+            depth += 1
+        elif text[p] == "}":
+            depth -= 1
+            if depth == 0:
+                return p + 1
+        p += 1
+    return n
+
+
+def clean_tool_calls(text: str) -> str:
+    """剔除文本中的 LLM 工具调用序列化（如 ``comfyui_draw{"name":...}``）。"""
+    if not text:
+        return text
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        end = _looks_like_tool_call(text, i)
+        if end > i:
+            i = end
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out).strip()
 
 
 def clean_media_placeholders(text: str) -> str:
@@ -37,6 +92,11 @@ def clean_media_placeholders(text: str) -> str:
     return t.strip()
 
 
+def clean_tts_text(text: str) -> str:
+    """回复文本综合净化：剔除媒体占位符标签 + LLM 工具调用序列化。"""
+    return clean_tool_calls(clean_media_placeholders(text))
+
+
 def is_speakable(text: str) -> bool:
     """判断文本是否值得拿去合成语音：
 
@@ -44,11 +104,12 @@ def is_speakable(text: str) -> bool:
     - 占位符 ``[]`` ``{}`` ``null`` ``None`` ``nil`` ``undefined`` → 否；
     - 仅由括号 / 空白 / 引号构成（如 ``[ ]`` ``{ }``） → 否；
     - 仅含媒体占位符标签（如 ``<pc_history_media images="1" />``）→ 否；
+    - 仅含工具调用序列化（如 ``comfyui_draw{"name":...}``）→ 否；
     - 其余（含正常中文、标点） → 是。
     """
     if not text:
         return False
-    t = clean_media_placeholders(text)
+    t = clean_tts_text(text)
     if not t:
         return False
     if t in ("[]", "{}", "null", "None", "nil", "undefined", "null"):

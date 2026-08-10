@@ -2,6 +2,14 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v1.17.2 (2026-08-10)
+
+- 修复「语音把 LLM 函数调用念出来了」：AstrBot 的 `tool_loop_agent_runner` 在工具循环中，最终响应的 `completion_text` 会混入工具调用序列化（如 `comfyui_draw{"name":"comfyui_draw","args":{...}}` + 完整 prompt JSON）。当结果链文本为空时，插件回退用 `_last_llm` 合成，就把这些工具调用 JSON 当正文念了（表现为 373 字里有 300 多字是工具调用内容）。
+  - 新增 `clean_tool_calls`：识别「标识符 + `{` + `"name"` 键」的工具调用形态，用大括号配对**完整剔除**整个 JSON 块（避免被分段器按标点切碎残留）。实测不误伤 `json.dumps({"name":...})`、普通 `{"name":...}` 讨论文本。
+  - 新增 `clean_tts_text`：媒体占位符 + 工具调用综合净化；`is_speakable` 对净化后为空的纯工具调用文本判为不可朗读。
+  - `on_llm_response` 检测 `LLMResponse.tool_calls/tools`：纯工具调用轮（无正文）**不覆盖 `_last_llm`**，保留上一轮干净文本，避免回退念出垃圾。
+  - 净化应用于：`_last_llm` 写入、结果链文本抽取与回退、`text_to_speech` 工具参数。
+
 ## v1.17.1 (2026-08-10)
 
 - 修复「带图片的消息出现 `<pc_history_media images="1" />` 占位文本」：该标签是平台/框架对**历史消息中图片媒体**的序列化占位符，此前会被插件当作普通正文——被朗读、或在 both 模式下显示为乱码。
