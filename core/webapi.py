@@ -15,14 +15,21 @@ endpoint 不带前缀）。
 
 from __future__ import annotations
 
-import asyncio
-import os
+import json
 
 from astrbot.api import logger
 from astrbot.api.web import error_response, json_response, request
 
 # 与 main.py 的 PLUGIN_ID 保持一致；route 前缀必须带插件名
 PLUGIN_ROUTE_PREFIX = "astrbot_plugin_cosyvoice"
+
+
+def json_dumps(value) -> str:
+    """安全地转 JSON 字符串（供配置展示用）。"""
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def register_web_apis(plugin) -> None:
@@ -34,13 +41,17 @@ def register_web_apis(plugin) -> None:
     p = PLUGIN_ROUTE_PREFIX
 
     ctx.register_web_api(f"/{p}/overview", _overview(plugin), ["GET"], "CosyVoice 概览（服务端健康/全局开关）")
+    ctx.register_web_api(f"/{p}/config", _get_config(plugin), ["GET"], "CosyVoice 配置（分组只读）")
     ctx.register_web_api(f"/{p}/voices", _list_voices(plugin), ["GET"], "CosyVoice 音色列表")
+    ctx.register_web_api(f"/{p}/voices/create", _create_voice(plugin), ["POST"], "新增音色")
+    ctx.register_web_api(f"/{p}/voices/update", _update_voice(plugin), ["POST"], "编辑音色")
+    ctx.register_web_api(f"/{p}/voices/delete", _delete_voice(plugin), ["POST"], "删除音色")
     ctx.register_web_api(f"/{p}/voices/default", _set_default_voice(plugin), ["POST"], "设置默认音色")
     ctx.register_web_api(f"/{p}/voices/hidden", _set_voice_hidden(plugin), ["POST"], "隐藏/显示音色")
     ctx.register_web_api(f"/{p}/sessions", _list_sessions(plugin), ["GET"], "会话语音状态列表")
     ctx.register_web_api(f"/{p}/sessions/set", _set_session(plugin), ["POST"], "按会话设置语音开关/音色/发送方式")
     ctx.register_web_api(f"/{p}/sessions/batch_off", _batch_off(plugin), ["POST"], "批量关闭会话语音")
-    ctx.register_web_api(f"/{p}/synthesize", _synthesize(plugin), ["POST"], "试听合成（返回 wav）")
+    ctx.register_web_api(f"/{p}/synthesize", _synthesize(plugin), ["POST"], "合成试听（返回 wav 下载）")
     logger.info(f"[cosyvoice] WebUI API 已注册（前缀 /api/plug/{p}/）")
 
 
@@ -49,35 +60,29 @@ def _overview(plugin):
     async def handler():
         plugin._refresh_cfg()
         cfg = plugin.config
-        # 服务端健康：优先取 Router 的节点视图
+        import time
+
+        # 服务端健康：读取 Router 的节点实时状态
         servers = []
         router = plugin.client
         try:
-            node_info = None
-            for attr in ("servers", "_servers", "_nodes"):
-                if hasattr(router, attr):
-                    node_info = getattr(router, attr)
-                    break
-            if isinstance(node_info, dict):
-                for s in node_info.values():
-                    if isinstance(s, dict):
-                        servers.append({
-                            "url": s.get("url", ""),
-                            "enabled": bool(s.get("enabled", True)),
-                            "default": bool(s.get("default", False)),
-                            "weight": s.get("weight", 1),
-                            "down_count": s.get("down_count", 0),
-                            "status": "down" if s.get("down_count", 0) > 0 else "ok",
-                        })
-            elif isinstance(node_info, (list, tuple)):
-                for s in node_info:
-                    if isinstance(s, dict):
-                        servers.append({
-                            "url": s.get("url", ""),
-                            "enabled": bool(s.get("enabled", True)),
-                            "default": bool(s.get("default", False)),
-                            "weight": s.get("weight", 1),
-                        })
+            nodes = getattr(router, "_nodes", None)
+            if isinstance(nodes, (list, tuple)):
+                for n in nodes:
+                    if not isinstance(n, dict):
+                        continue
+                    cooldown = float(n.get("cooldown_until", 0.0) or 0.0)
+                    remaining = max(0.0, cooldown - time.time())
+                    failed = int(n.get("failed", 0) or 0)
+                    servers.append({
+                        "url": n.get("url", ""),
+                        "enabled": True,
+                        "default": bool(n.get("default", False)),
+                        "weight": n.get("weight", 1),
+                        "failed": failed,
+                        "cooldown_remaining": round(remaining, 1),
+                        "status": "cooldown" if remaining > 0 else ("degraded" if failed else "ok"),
+                    })
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[cosyvoice] 读取服务端节点状态失败: {e}")
         if not servers:
@@ -85,12 +90,14 @@ def _overview(plugin):
                 "url": cfg.get("base_url", ""),
                 "enabled": True,
                 "default": True,
+                "weight": 1,
+                "failed": 0,
+                "cooldown_remaining": 0.0,
                 "status": "ok",
             }]
 
-        # 熔断冷却
+        # 熔断冷却（插件级，与服务端节点冷却不同）
         cooldown_until = getattr(plugin, "_server_cooldown_until", 0.0)
-        import time
         remaining = max(0.0, cooldown_until - time.time()) if cooldown_until else 0.0
 
         return json_response({
@@ -102,10 +109,15 @@ def _overview(plugin):
                 "send_mode": cfg.get("send_mode", "both"),
                 "tts_scope": cfg.get("tts_scope", "llm_only"),
                 "enable_llm_tool": bool(cfg.get("enable_llm_tool", True)),
+                "enable_user_trigger": bool(cfg.get("enable_user_trigger", True)),
                 "default_voice": plugin._effective_default_voice(),
                 "sample_rate": int(cfg.get("sample_rate", 24000)),
                 "base_url": cfg.get("base_url", ""),
                 "server_voices_dir": cfg.get("server_voices_dir", "") or "",
+                "segment_merge": bool(cfg.get("segment_merge", False)),
+                "tts_concurrency": int(cfg.get("tts_concurrency", 1) or 1),
+                "tts_cooldown_sec": float(cfg.get("tts_cooldown_sec", 30)),
+                "timeout": int(cfg.get("timeout", 150)),
             },
             "voice_count": len(plugin.engine.voices),
             "session_count": len(plugin._sessions),
@@ -114,7 +126,48 @@ def _overview(plugin):
     return handler
 
 
-# ---------- 音色列表 ----------
+# ---------- 配置（分组只读，供「配置」tab 展示） ----------
+def _get_config(plugin):
+    async def handler():
+        plugin._refresh_cfg()
+        cfg = plugin.config
+        groups = {
+            "服务端": {
+                "服务地址 (base_url)": cfg.get("base_url", ""),
+                "服务端列表 (servers)": json_dumps(cfg.get("servers") or []),
+                "服务端音频目录 (server_voices_dir)": cfg.get("server_voices_dir", "") or "",
+                "采样率 (sample_rate)": cfg.get("sample_rate", 24000),
+                "请求超时/秒 (timeout)": cfg.get("timeout", 150),
+                "排队阈值 (tts_queue_max_position)": cfg.get("tts_queue_max_position", 8),
+            },
+            "语音行为": {
+                "自动语音 (auto_tts)": bool(cfg.get("auto_tts", False)),
+                "发送方式 (send_mode)": cfg.get("send_mode", "both"),
+                "语音范围 (tts_scope)": cfg.get("tts_scope", "llm_only"),
+                "默认音色 (default_voice)": plugin._effective_default_voice(),
+                "LLM 工具 (enable_llm_tool)": bool(cfg.get("enable_llm_tool", True)),
+                "关键词触发 (enable_user_trigger)": bool(cfg.get("enable_user_trigger", True)),
+                "触发关键词 (trigger_keywords)": cfg.get("trigger_keywords", []),
+                "纯文字关键词 (text_keywords)": cfg.get("text_keywords", []),
+                "黑名单 (blocklist)": cfg.get("blocklist", []),
+                "白名单 (allowlist)": cfg.get("allowlist", []),
+                "并发上限 (tts_concurrency)": cfg.get("tts_concurrency", 1),
+            },
+            "分段与重试": {
+                "分段字数 (segment_len)": cfg.get("segment_len", 0),
+                "首段字数 (segment_first_len)": cfg.get("segment_first_len", 0),
+                "分段符号 (segment_punct)": cfg.get("segment_punct", ""),
+                "单段硬上限 (max_text_len)": cfg.get("max_text_len", 200),
+                "按换行分段 (split_by_newline)": bool(cfg.get("split_by_newline", True)),
+                "合并单条发送 (segment_merge)": bool(cfg.get("segment_merge", False)),
+                "失败重试 (tts_max_retry)": cfg.get("tts_max_retry", 0),
+                "重试退避 (tts_retry_backoff)": cfg.get("tts_retry_backoff", 0.5),
+                "冷却时长/秒 (tts_cooldown_sec)": cfg.get("tts_cooldown_sec", 30),
+            },
+        }
+        return json_response({"groups": groups})
+
+    return handler
 def _list_voices(plugin):
     async def handler():
         plugin._refresh_cfg()
@@ -127,10 +180,88 @@ def _list_voices(plugin):
                 "prompt_text": v.get("prompt_text", ""),
                 "hidden": bool(v.get("hidden", False)),
                 "is_default": name == default,
+                "in_lib": name in plugin._voices_lib,  # 是否由 WebUI 管理
                 # 本地能否解析到参考音频（排查用）
                 "wav_resolved": bool(plugin.engine.resolve_wav(v.get("prompt_wav", ""))),
             })
         return json_response({"voices": result, "default_voice": default})
+
+    return handler
+
+
+# ---------- 新增音色（WebUI 音色库） ----------
+def _create_voice(plugin):
+    async def handler():
+        payload = await request.json(default={})
+        name = str(payload.get("name") or "").strip()
+        prompt_wav = str(payload.get("prompt_wav") or "").strip()
+        prompt_text = str(payload.get("prompt_text") or "").strip()
+        hidden = bool(payload.get("hidden", False))
+        if not name:
+            return error_response("音色名不能为空", status_code=400)
+        if name in plugin._effective_voices():
+            return error_response(f"音色「{name}」已存在", status_code=400)
+        plugin._voices_lib[name] = {
+            "prompt_wav": prompt_wav,
+            "prompt_text": prompt_text,
+            "hidden": hidden,
+        }
+        plugin._save_voices_lib()
+        plugin._refresh_cfg()
+        logger.info(f"[cosyvoice] WebUI 新增音色「{name}」")
+        return json_response({"ok": True})
+
+    return handler
+
+
+# ---------- 编辑音色 ----------
+def _update_voice(plugin):
+    async def handler():
+        payload = await request.json(default={})
+        name = str(payload.get("name") or "").strip()
+        if not name or name not in plugin._effective_voices():
+            return error_response(f"没有「{name}」这个音色", status_code=400)
+        entry = dict(plugin._voices_lib.get(name, {
+            "prompt_wav": plugin.engine.voices.get(name, {}).get("prompt_wav", ""),
+            "prompt_text": plugin.engine.voices.get(name, {}).get("prompt_text", ""),
+            "hidden": bool(plugin.engine.voices.get(name, {}).get("hidden", False)),
+        }))
+        if "prompt_wav" in payload:
+            entry["prompt_wav"] = str(payload["prompt_wav"] or "").strip()
+        if "prompt_text" in payload:
+            entry["prompt_text"] = str(payload["prompt_text"] or "").strip()
+        if "hidden" in payload:
+            entry["hidden"] = bool(payload["hidden"])
+        plugin._voices_lib[name] = entry
+        plugin._save_voices_lib()
+        plugin._refresh_cfg()
+        logger.info(f"[cosyvoice] WebUI 编辑音色「{name}」")
+        return json_response({"ok": True})
+
+    return handler
+
+
+# ---------- 删除音色（二次确认由前端弹窗保证） ----------
+def _delete_voice(plugin):
+    async def handler():
+        payload = await request.json(default={})
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return error_response("缺少音色名", status_code=400)
+        if name not in plugin._effective_voices():
+            return error_response(f"没有「{name}」这个音色", status_code=400)
+        # 仅能删除 WebUI 音色库中的音色（配置里的由配置页管理）
+        if name not in plugin._voices_lib:
+            return error_response(f"「{name}」来自插件配置，请在 AstrBot 配置弹窗中删除", status_code=400)
+        del plugin._voices_lib[name]
+        plugin._save_voices_lib()
+        # 若删的是默认音色，清掉 override
+        if plugin._default_voice_override == name:
+            plugin._default_voice_override = ""
+            plugin._save_default_voice_override("")
+        plugin._refresh_cfg()
+        logger.info(f"[cosyvoice] WebUI 删除音色「{name}」")
+        return json_response({"ok": True})
 
     return handler
 
@@ -159,14 +290,17 @@ def _set_voice_hidden(plugin):
         payload = await request.json(default={})
         name = str(payload.get("name") or "").strip()
         hidden = bool(payload.get("hidden", False))
-        all_voices = plugin.engine.list_voices(include_hidden=True)
+        all_voices = plugin._effective_voices()
         if name not in all_voices:
             return error_response(f"没有「{name}」这个音色", status_code=400)
-        # 音色隐藏标记来自配置 template_list，此处不写配置（避免破坏 schema）；
-        # 通过 engine 内存热切换，下次配置刷新后恢复。若要持久化请改配置页。
-        v = plugin.engine.voices.get(name, {})
-        v["hidden"] = hidden
-        logger.info(f"[cosyvoice] WebUI 切换音色「{name}」hidden={hidden}（内存态，见说明）")
+        # 仅 WebUI 音色库中的音色可持久改 hidden；配置音色由配置页管理（此处仅热生效）
+        if name in plugin._voices_lib:
+            plugin._voices_lib[name]["hidden"] = hidden
+            plugin._save_voices_lib()
+        else:
+            plugin.engine.voices[name]["hidden"] = hidden
+        plugin._refresh_cfg()
+        logger.info(f"[cosyvoice] WebUI 切换音色「{name}」hidden={hidden}")
         return json_response({"ok": True})
 
     return handler
@@ -254,7 +388,7 @@ def _batch_off(plugin):
     return handler
 
 
-# ---------- 试听合成 ----------
+# ---------- 合成试听 ----------
 def _synthesize(plugin):
     async def handler():
         payload = await request.json(default={})
@@ -267,94 +401,17 @@ def _synthesize(plugin):
         if voice_name is None:
             return error_response("未配置任何可用音色", status_code=400)
 
-        # 优先走「服务端存音频返回直链」：需要服务端支持 /synthesize_save。
-        # 若失败（旧服务端无此端点 / 服务端不可达），回退本地合成 + file_response。
-        try:
-            url = await asyncio.to_thread(
-                _server_preview_url, plugin, voice_name, prompt_wav, prompt_text, text
-            )
-            if url:
-                return json_response({"url": url})
-            raise RuntimeError("服务端不支持 /synthesize_save")
-        except Exception as e:  # noqa: BLE001
-            logger.info(f"[cosyvoice] WebUI 试听走服务端直链失败，回退本地合成: {e}")
+        # 本地合成：走插件同一套合成管线（并发信号量 + 熔断 + 分片），
+        # 返回 wav 文件，前端 bridge.download 触发浏览器下载。
+        from astrbot.api.web import file_response
 
         try:
             wav_path = await plugin.engine.synthesize(text, voice)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[cosyvoice] WebUI 试听合成失败: {e}")
-            return json_response({"url": None, "reason": f"试听合成失败：{e}"})
+            return error_response(f"试听合成失败：{e}", status_code=500)
         if not wav_path:
-            return json_response({"url": None, "reason": "试听合成失败（无有效音频，可能是纯符号/无音色）"})
-        # 回退模式：本地合成后经 astrbot.api.web.send_file 返回 wav 二进制
-        from astrbot.api.web import file_response
-
+            return error_response("试听合成失败（无有效音频，可能是纯符号/无音色）", status_code=500)
         return file_response(wav_path, filename="cosyvoice_preview.wav", content_type="audio/wav")
 
     return handler
-
-
-def _server_preview_url(plugin, voice_name: str, prompt_wav: str, prompt_text: str, text: str) -> str | None:
-    """调服务端 /synthesize_save 返回可直连的完整音频 URL；失败返回 None。
-
-    合成的音频保存到 CosyVoice 服务端本地，返回相对 url（/audio/<name>.wav），
-    这里拼上配置的 base_url（对外可达地址）供浏览器 <audio> 直连播放。
-    """
-    import httpx
-
-    base_url = _pick_server_url(plugin)
-    if not base_url:
-        return None
-
-    data = {"tts_text": text}
-    if prompt_text:
-        data["prompt_text"] = prompt_text
-    # 参考音频模式：
-    # - 配置了 server_voices_dir（服务端存音频）→ 传文件名 prompt_wav_path；
-    # - 否则本地上传模式 → 把本机 wav 以表单上传。
-    server_dir_mode = bool((plugin.config.get("server_voices_dir") or "").strip())
-    local_wav = ""
-    files = None
-    if prompt_wav:
-        local_wav = plugin.engine.resolve_wav(prompt_wav)
-        if server_dir_mode:
-            data["prompt_wav_path"] = os.path.basename(prompt_wav.strip())
-        elif os.path.exists(local_wav):
-            with open(local_wav, "rb") as f:
-                wav_bytes = f.read()
-            files = {"prompt_wav": (os.path.basename(local_wav), wav_bytes, "audio/wav")}
-        else:
-            return None
-
-    try:
-        timeout = httpx.Timeout(20.0)
-        with httpx.Client(timeout=timeout) as client:
-            resp = client.post(f"{base_url}/synthesize_save", data=data, files=files)
-            resp.raise_for_status()
-            payload = resp.json()
-            rel = payload.get("url")
-            if not rel:
-                return None
-            return f"{base_url}{rel}"
-    except Exception as e:  # noqa: BLE001
-        logger.debug(f"[cosyvoice] 服务端 /synthesize_save 调用失败: {e}")
-        return None
-
-
-def _pick_server_url(plugin) -> str:
-    """取一个对外可达的 CosyVoice 服务地址（默认节点 / 首个启用节点 / 配置 base_url）。"""
-    router = plugin.client
-    try:
-        for attr in ("_servers", "servers", "_nodes"):
-            nodes = getattr(router, attr, None)
-            if isinstance(nodes, dict):
-                for s in nodes.values():
-                    if isinstance(s, dict) and s.get("enabled", True):
-                        return str(s.get("url") or "").rstrip("/")
-            elif isinstance(nodes, (list, tuple)):
-                for s in nodes:
-                    if isinstance(s, dict) and s.get("enabled", True):
-                        return str(s.get("url") or "").rstrip("/")
-    except Exception:
-        pass
-    return str(plugin.config.get("base_url", "") or "").rstrip("/")

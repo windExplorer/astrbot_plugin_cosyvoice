@@ -4,8 +4,7 @@
       <el-alert
         v-if="data.server_down"
         type="warning"
-        :title="t('overview.serverDown', '语音服务器失联（冷却中）')"
-        :description="t('overview.cooldownDesc', `剩余 ${data.cooldown_remaining}s 不再发 TTS 请求`)"
+        :title="`语音服务器失联（冷却中，剩 ${data.cooldown_remaining}s）`"
         :closable="false"
         show-icon
         style="margin-bottom: 12px"
@@ -13,43 +12,42 @@
 
       <div class="card-grid">
         <el-card shadow="never">
-          <template #header>{{ t('overview.health', '服务端健康') }}</template>
+          <template #header>服务端健康</template>
           <div v-for="(s, i) in data.servers" :key="i" class="server-row">
-            <el-tag :type="s.status === 'ok' ? 'success' : 'danger'" size="small">
-              {{ s.status === 'ok' ? 'OK' : s.status }}
-            </el-tag>
+            <el-tag :type="statusTag(s.status)" size="small">{{ statusText(s) }}</el-tag>
             <span class="server-url" :title="s.url">{{ s.url }}</span>
-            <span v-if="s.default" class="muted">★</span>
+            <span v-if="s.default" class="muted">★ 默认</span>
           </div>
-          <div v-if="!data.servers.length" class="muted">{{ t('overview.noServer', '无服务端信息') }}</div>
+          <div v-if="!data.servers.length" class="muted">无服务端信息</div>
         </el-card>
 
         <el-card shadow="never">
-          <template #header>{{ t('overview.global', '全局配置') }}</template>
+          <template #header>全局配置</template>
           <el-descriptions :column="1" size="small">
-            <el-descriptions-item :label="t('overview.autoTts', '自动语音')">
+            <el-descriptions-item label="自动语音">
               <el-tag :type="data.config.auto_tts ? 'success' : 'info'" size="small">
                 {{ data.config.auto_tts ? 'ON' : 'OFF' }}
               </el-tag>
             </el-descriptions-item>
-            <el-descriptions-item :label="t('overview.sendMode', '发送方式')">{{ data.config.send_mode }}</el-descriptions-item>
-            <el-descriptions-item :label="t('overview.scope', '语音范围')">{{ data.config.tts_scope }}</el-descriptions-item>
-            <el-descriptions-item :label="t('overview.defaultVoice', '默认音色')">{{ data.config.default_voice || '-' }}</el-descriptions-item>
-            <el-descriptions-item :label="t('overview.sampleRate', '采样率')">{{ data.config.sample_rate }} Hz</el-descriptions-item>
+            <el-descriptions-item label="发送方式">{{ data.config.send_mode }}</el-descriptions-item>
+            <el-descriptions-item label="语音范围">{{ data.config.tts_scope }}</el-descriptions-item>
+            <el-descriptions-item label="默认音色">{{ data.config.default_voice || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="采样率">{{ data.config.sample_rate }} Hz</el-descriptions-item>
           </el-descriptions>
         </el-card>
 
         <el-card shadow="never">
-          <template #header>{{ t('overview.stats', '统计') }}</template>
+          <template #header>统计</template>
           <el-descriptions :column="1" size="small">
-            <el-descriptions-item :label="t('overview.voiceCount', '音色数量')">{{ data.voice_count }}</el-descriptions-item>
-            <el-descriptions-item :label="t('overview.sessionCount', '已开启会话')">{{ data.session_count }}</el-descriptions-item>
-            <el-descriptions-item :label="t('overview.baseUrl', '服务地址')">{{ data.config.base_url }}</el-descriptions-item>
+            <el-descriptions-item label="音色数量">{{ data.voice_count }}</el-descriptions-item>
+            <el-descriptions-item label="开启会话数">{{ data.session_count }}</el-descriptions-item>
+            <el-descriptions-item label="服务地址">{{ data.config.base_url }}</el-descriptions-item>
+            <el-descriptions-item label="服务端音频目录">{{ data.config.server_voices_dir || '-' }}</el-descriptions-item>
           </el-descriptions>
         </el-card>
       </div>
 
-      <el-button size="small" :loading="loading" @click="load">{{ t('overview.refresh', '刷新') }}</el-button>
+      <el-button size="small" :loading="loading" @click="load">刷新</el-button>
     </div>
   </div>
 </template>
@@ -58,13 +56,16 @@
 import { ref, inject, onMounted } from 'vue'
 import bridge from '../api'
 
-const ctx = inject('bridgeCtx')
 const notify = inject('notify')
 const data = ref({ servers: [], config: {}, voice_count: 0, session_count: 0, server_down: false, cooldown_remaining: 0 })
 const loading = ref(false)
 
-const t = (key, fb) => {
-  try { return bridge.t(key, fb) } catch (_e) { return fb || key }
+const statusTag = (s) => (s === 'ok' ? 'success' : s === 'cooldown' ? 'warning' : 'danger')
+const statusText = (s) => {
+  if (s.status === 'ok') return 'OK'
+  if (s.status === 'cooldown') return `冷却 ${s.cooldown_remaining}s`
+  if (s.status === 'degraded') return `异常 x${s.failed}`
+  return s.status
 }
 
 async function load() {
@@ -72,7 +73,7 @@ async function load() {
   try {
     data.value = await bridge.apiGet('overview')
   } catch (e) {
-    notify.error(e.message || 'load failed')
+    notify.error(e.message || '加载失败')
   } finally {
     loading.value = false
   }

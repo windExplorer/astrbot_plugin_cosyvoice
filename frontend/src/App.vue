@@ -1,35 +1,30 @@
 <template>
   <div class="cosyvoice-app">
     <el-tabs v-model="activeTab" class="main-tabs">
-      <el-tab-pane :label="t('overview.tab', '概览')" name="overview">
+      <el-tab-pane label="概览" name="overview">
         <OverviewPanel />
       </el-tab-pane>
-      <el-tab-pane :label="t('voices.tab', '音色管理')" name="voices">
+      <el-tab-pane label="音色管理" name="voices">
         <VoicesPanel />
       </el-tab-pane>
-      <el-tab-pane :label="t('sessions.tab', '会话管理')" name="sessions">
+      <el-tab-pane label="会话管理" name="sessions">
         <SessionsPanel />
+      </el-tab-pane>
+      <el-tab-pane label="配置" name="config">
+        <ConfigPanel />
       </el-tab-pane>
     </el-tabs>
   </div>
 </template>
 
 <script setup>
-import { ref, inject } from 'vue'
-import bridge from './api'
+import { ref } from 'vue'
 import OverviewPanel from './components/OverviewPanel.vue'
 import VoicesPanel from './components/VoicesPanel.vue'
 import SessionsPanel from './components/SessionsPanel.vue'
+import ConfigPanel from './components/ConfigPanel.vue'
 
-const ctx = inject('bridgeCtx')
 const activeTab = ref('overview')
-const t = (key, fb) => {
-  try {
-    return bridge.t(key, fb)
-  } catch (_e) {
-    return fb || key
-  }
-}
 </script>
 
 <style>
@@ -52,14 +47,17 @@ body {
   font-family: 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
 }
 .cosyvoice-app {
-  padding: 12px;
+  /* 1000px 居中，不占满全屏 */
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 16px;
 }
 .main-tabs .el-tabs__header {
   margin-bottom: 16px;
 }
 .card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 12px;
   margin-bottom: 16px;
 }

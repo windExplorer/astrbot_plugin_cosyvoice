@@ -98,6 +98,10 @@ class CosyVoicePlugin(Star):
         # 存在时优先于配置项 default_voice；聊天/WebUI 都可覆盖。
         self._default_voice_file = os.path.join(data_dir, "tts_default_voice.json")
         self._default_voice_override = self._load_default_voice_override()
+        # WebUI 音色库（新增/编辑/删除的音色）：data/ 持久，优先于 AstrBot 配置 voices。
+        # 让 WebUI 能独立管理音色，不被 _refresh_cfg 用配置覆盖。
+        self._voices_lib_file = os.path.join(data_dir, "tts_voices_lib.json")
+        self._voices_lib = self._load_voices_lib()
 
     def _data_dir(self) -> str:
         """持久数据目录。
@@ -250,6 +254,31 @@ class CosyVoicePlugin(Star):
         with open(self._voice_file, "w", encoding="utf-8") as f:
             json.dump(self._voices, f, ensure_ascii=False, indent=2)
 
+    # ---------- WebUI 音色库（新增/编辑/删除，优先生效） ----------
+    def _load_voices_lib(self) -> dict:
+        try:
+            with open(self._voices_lib_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+        return {}
+
+    def _save_voices_lib(self):
+        os.makedirs(os.path.dirname(self._voices_lib_file), exist_ok=True)
+        with open(self._voices_lib_file, "w", encoding="utf-8") as f:
+            json.dump(self._voices_lib, f, ensure_ascii=False, indent=2)
+
+    def _effective_voices(self) -> dict:
+        """实际生效的音色库：WebUI 音色库（data/）优先，合并配置 voices 为基底。
+        返回 { 音色名: {prompt_wav, prompt_text, hidden} }。
+        """
+        merged = dict(self.config.get("voices") or {})
+        for name, v in self._voices_lib.items():
+            merged[name] = v
+        return merged
+
     # ---------- WebUI 设置的默认音色（与 AstrBot 主配置解耦，data/ 持久） ----------
     def _load_default_voice_override(self) -> str:
         try:
@@ -310,7 +339,9 @@ class CosyVoicePlugin(Star):
             merged["default_voice"] = self._default_voice_override
         self.config = merged
         self.engine.config = merged
-        self.engine.update_voices(merged.get("voices") or {})
+        # 引擎音色 = 配置 voices + WebUI 音色库（WebUI 新增/编辑/删除优先）
+        effective_voices = self._effective_voices()
+        self.engine.update_voices(effective_voices)
         # 多服务端配置热更新：servers 列表或 base_url 变化时重建分流节点。
         self._refresh_servers(merged)
         # 冷却时长（秒）：服务端失联后多久内不再发任何 TTS 请求、直接回退文字。
