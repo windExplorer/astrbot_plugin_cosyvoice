@@ -51,7 +51,7 @@ def register_web_apis(plugin) -> None:
     ctx.register_web_api(f"/{p}/sessions", _list_sessions(plugin), ["GET"], "会话语音状态列表")
     ctx.register_web_api(f"/{p}/sessions/set", _set_session(plugin), ["POST"], "按会话设置语音开关/音色/发送方式")
     ctx.register_web_api(f"/{p}/sessions/batch_off", _batch_off(plugin), ["POST"], "批量关闭会话语音")
-    ctx.register_web_api(f"/{p}/synthesize", _synthesize(plugin), ["POST"], "合成试听（返回 wav 下载）")
+    ctx.register_web_api(f"/{p}/synthesize", _synthesize(plugin), ["GET", "POST"], "合成试听（返回 wav 下载）")
     logger.info(f"[cosyvoice] WebUI API 已注册（前缀 /api/plug/{p}/）")
 
 
@@ -391,9 +391,13 @@ def _batch_off(plugin):
 # ---------- 合成试听 ----------
 def _synthesize(plugin):
     async def handler():
-        payload = await request.json(default={})
-        text = str(payload.get("text") or "").strip()
-        voice = str(payload.get("voice") or "").strip() or None
+        # 支持 GET(query) 与 POST(json)：bridge.download 走 GET。
+        text = str(request.query.get("text") or "").strip()
+        voice = str(request.query.get("voice") or "").strip() or None
+        if not text:
+            payload = await request.json(default={})
+            text = str(payload.get("text") or "").strip()
+            voice = str(payload.get("voice") or "").strip() or None
         if not text:
             return error_response("缺少试听文本", status_code=400)
 
@@ -401,9 +405,10 @@ def _synthesize(plugin):
         if voice_name is None:
             return error_response("未配置任何可用音色", status_code=400)
 
-        # 本地合成：走插件同一套合成管线（并发信号量 + 熔断 + 分片），
-        # 返回 wav 文件，前端 bridge.download 触发浏览器下载。
+        # 合成：走插件同一套合成管线（并发信号量 + 熔断 + 分片）。
         from astrbot.api.web import file_response
+
+        import os as _os
 
         try:
             wav_path = await plugin.engine.synthesize(text, voice)
@@ -412,6 +417,20 @@ def _synthesize(plugin):
             return error_response(f"试听合成失败：{e}", status_code=500)
         if not wav_path:
             return error_response("试听合成失败（无有效音频，可能是纯符号/无音色）", status_code=500)
-        return file_response(wav_path, filename="cosyvoice_preview.wav", content_type="audio/wav")
+
+        # 复制到插件数据目录 data/previews/ 留存（固定文件名：<音色名>.wav）
+        previews_dir = _os.path.join(plugin._data_dir(), "previews")
+        _os.makedirs(previews_dir, exist_ok=True)
+        import shutil
+
+        safe_name = "".join(ch for ch in voice_name if ch.isalnum() or ch in "-_.") or "preview"
+        target = _os.path.join(previews_dir, f"{safe_name}.wav")
+        try:
+            shutil.copyfile(wav_path, target)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[cosyvoice] 试听音频复制到预览目录失败: {e}")
+            target = wav_path
+
+        return file_response(target, filename=f"cosyvoice_{safe_name}.wav", content_type="audio/wav")
 
     return handler

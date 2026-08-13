@@ -167,9 +167,12 @@ async function doPreview() {
   previewLoading.value = true
   previewError.value = ''
   try {
-    const body = { text: previewText.value, voice: currentVoice.value }
-    // bridge.download 触发后端返回 wav 并下载到本地
-    await bridge.download('synthesize', null, 'cosyvoice_preview.wav')
+    // bridge.download 走 GET，把 text/voice 放 query 参数
+    await bridge.download(
+      'synthesize',
+      { text: previewText.value, voice: currentVoice.value },
+      'cosyvoice_preview.wav'
+    )
     notify.success('已合成并开始下载')
     previewError.value = ''
   } catch (e) {
