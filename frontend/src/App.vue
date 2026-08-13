@@ -47,8 +47,8 @@ body {
   font-family: 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
 }
 .cosyvoice-app {
-  /* 1000px 居中，不占满全屏 */
-  max-width: 1000px;
+  /* 1200px 居中 */
+  max-width: 1200px;
   margin: 0 auto;
   padding: 16px;
 }
