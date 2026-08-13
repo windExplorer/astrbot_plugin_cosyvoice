@@ -273,8 +273,14 @@ class CosyVoicePlugin(Star):
     def _effective_voices(self) -> dict:
         """实际生效的音色库：WebUI 音色库（data/）优先，合并配置 voices 为基底。
         返回 { 音色名: {prompt_wav, prompt_text, hidden} }。
+        配置 voices 可能是 list（template_list）或 dict 或 JSON 字符串，
+        统一用 engine 的归一化逻辑转成 dict，避免 dict(list) 报错。
         """
-        merged = dict(self.config.get("voices") or {})
+        config_voices = self.config.get("voices") or {}
+        try:
+            merged = dict(self.engine._norm_voices(config_voices))
+        except Exception:  # noqa: BLE001
+            merged = {}
         for name, v in self._voices_lib.items():
             merged[name] = v
         return merged
