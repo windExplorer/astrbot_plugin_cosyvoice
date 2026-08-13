@@ -135,7 +135,25 @@ astrbot_plugin_cosyvoice/
 4. 按需调整 `auto_tts` / `tts_scope` / `send_mode` / 触发关键词。
 5. 触发：直接对话（配合关键词或 `auto_tts`）、发送 `/tts 你好`、或让大模型调用 `text_to_speech`。
 
-## 十一、已知风险与待验证
+## 十二、WebUI 管理面板（插件 Pages）
+
+已于 v1.18.0 加入 **AstrBot 插件 Pages**（Dashboard 内嵌页 `pages/cosyvoice/`）+ 后端 Web API。
+
+### 关键决策
+- **页面机制**：`pages/cosyvoice/index.html`（Vue3+Vite 构建产物，hash routing），AstrBot 自动发现挂载；不注册 Python 页面路由。
+- **后端 API**：`context.register_web_api("/astrbot_plugin_cosyvoice/xxx", handler, methods, desc)` 注册，handler 用 `astrbot.api.web` 的 `request/json_response/error_response`；前端经 `window.AstrBotPluginPage` bridge（`apiGet/apiPost`）调用。
+- **配置解耦**：WebUI 写插件自有 `data/tts_default_voice.json`（默认音色）+ 既有 `data/tts_*.json`（会话开关/音色/发送方式），热生效、重启不丢；不写 AstrBot 主配置。`_refresh_cfg()` 中 override 优先于配置项 `default_voice`。
+- **试听直链**：服务端新增 `POST /synthesize_save`（存 wav 到 `cosyvoice_previews/`，返回 `/audio/<name>.wav`）+ `GET /audio/{name}`（`Cache-Control` 缓存）。插件 `synthesize` 接口优先调它拿直链，浏览器 `<audio>` 直连播放并本地缓存；服务端未升级时回退本地 `engine.synthesize` + wav 下载。
+- **i18n**：`.astrbot-plugin/i18n/{zh,en,ja,ko}.json`，`bridge.t("pages.cosyvoice.*")`。
+
+### 服务端新端点契约（deploy/cosyvoice_api.py）
+```
+POST /synthesize_save   表单同 /inference_zero_shot → {"url": "/audio/<uuid>.wav", "sample_rate": N}
+GET  /audio/{name}      FileResponse(wav) + Cache-Control: public, max-age=86400
+```
+预览文件保留 24h，每次合成后清理；启动时 `makedirs(PREVIEW_DIR)` + 清理一次。
+
+## 十三、已知风险与待验证
 
 - 官方 server 对 CosyVoice3-0.5B-2512 的加载兼容性（见第三节回退方案）。
 - `Record` 仅部分平台支持（QQ 个人号/企业微信等），Telegram 等可能不支持语音组件。

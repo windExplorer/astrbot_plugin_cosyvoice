@@ -1,0 +1,61 @@
+{
+  "pages": {
+    "cosyvoice": {
+      "title": "CosyVoice 语音管理",
+      "description": "管理 CosyVoice 音色、会话语音状态与试听",
+      "overview": {
+        "tab": "概览",
+        "serverDown": "语音服务器失联（冷却中）",
+        "cooldownDesc": "剩余 {time}s 不再发 TTS 请求",
+        "health": "服务端健康",
+        "noServer": "无服务端信息",
+        "global": "全局配置",
+        "autoTts": "自动语音",
+        "sendMode": "发送方式",
+        "scope": "语音范围",
+        "defaultVoice": "默认音色",
+        "sampleRate": "采样率",
+        "stats": "统计",
+        "voiceCount": "音色数量",
+        "sessionCount": "已开启会话",
+        "baseUrl": "服务地址",
+        "refresh": "刷新"
+      },
+      "voices": {
+        "tab": "音色管理",
+        "note": "音色列表由插件配置提供，WebUI 提供快捷操作与试听；隐藏/默认设置热生效，重启后以配置为准。",
+        "name": "音色名",
+        "promptWav": "参考音频",
+        "promptText": "参考文本",
+        "wavResolved": "音频可达",
+        "hidden": "隐藏",
+        "actions": "操作",
+        "listen": "试听",
+        "default": "默认",
+        "setDefault": "设为默认",
+        "preview": "试听",
+        "previewPlaceholder": "输入要试听的文本",
+        "synthesize": "合成试听",
+        "downloadMode": "当前环境会下载试听音频，请播放下载文件",
+        "previewError": "试听合成失败"
+      },
+      "sessions": {
+        "tab": "会话管理",
+        "search": "搜索会话（origin）",
+        "batchOff": "批量关闭当前列表",
+        "origin": "会话",
+        "on": "语音开关",
+        "voice": "音色",
+        "sendMode": "发送方式",
+        "followGlobal": "跟随全局",
+        "noneOn": "列表中没有开启语音的会话",
+        "batchDone": "已关闭 {count} 个会话"
+      },
+      "common": {
+        "cancel": "取消",
+        "refresh": "刷新",
+        "close": "关闭"
+      }
+    }
+  }
+}

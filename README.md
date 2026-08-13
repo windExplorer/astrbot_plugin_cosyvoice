@@ -29,6 +29,23 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 | 大模型调用 `list_voices` | 列出可用音色 | — | LLM 工具，回答「你有哪些声音」类问题 |
 | 大模型调用 `set_voice <音色名>` | 切换当前聊天音色 | ✅ 持久 | LLM 工具，模型按自然语言（如「换成小明的声音」）切换音色 |
 
+## WebUI 管理面板（插件 Pages）
+
+本插件提供一个 **Dashboard 内嵌管理页**（AstrBot 插件 Pages），在 WebUI「插件 → 本插件详情 → CosyVoice 语音管理」打开。
+
+三个 Tab：
+
+- **概览**：服务端健康（各节点在线/熔断冷却剩余秒）、全局配置（自动语音/发送方式/范围/默认音色/采样率）、统计。
+- **音色管理**：音色表格（参考音频/文本/音频可达性/隐藏），**试听**（优先服务端直链 `/synthesize_save`，浏览器直连播放并本地缓存；服务端未升级时回退本地合成下载），设默认、隐藏切换。
+- **会话管理**：按会话（origin）查看/切换语音开关、音色、发送方式，搜索 + 批量关闭。
+
+**与配置弹窗的关系（解耦）**：
+
+- 会话开关/会话音色/发送方式、WebUI 设置的默认音色，均存插件自有 `data/tts_*.json`（与聊天指令 `/tts_on`、`/tts_voice` 同源），**重启不丢、热生效**，与 AstrBot 主配置解耦。
+- 音色本身的 `prompt_wav / prompt_text` 由 AstrBot 配置弹窗（`_conf_schema.json` 的 voices template_list）维护，WebUI 只读展示 + 快捷操作。
+
+**服务端要求**：试听直链需要 CosyVoice 服务端升级到新版 `deploy/cosyvoice_api.py`（含 `POST /synthesize_save` 与 `GET /audio/{name}`）；未升级也能用（WebUI 回退本地合成下载播放）。详见 [deploy/README.md](./deploy/README.md)。
+
 ## 配置（`_conf_schema.json`）
 
 | 配置 | 默认 | 说明 |
@@ -86,7 +103,7 @@ python3 pack.py
 ```
 
 - 输出位于 `dist/astrbot_plugin_cosyvoice_v<版本号>.zip`（同名不覆盖，重打会追加时间戳），zip 顶层目录即为插件名 `astrbot_plugin_cosyvoice/`，AstrBot 解压后可直接识别。
-- 自动排除无需上线的内容：`.git`、`__pycache__`、`*.pyc`、`.venv`、`node_modules`、`dist`、打包脚本自身。
+- 自动排除无需上线的内容：`.git`、`__pycache__`、`*.pyc`、`.venv`、`node_modules`、`dist`、打包脚本自身，以及前端源码 `frontend/`（构建产物 `pages/cosyvoice/` 会打包进去，供 WebUI 使用）。
 - `deploy/`（CosyVoice 服务端）也会一并打包进插件仓库 zip，但 AstrBot 运行时不会加载它；服务端需单独按 [deploy/README.md](./deploy/README.md) 在 CosyVoice 机器上部署。
 - 上传后记得在插件配置里填好 `base_url`、`server_voices_dir`、各音色的 `prompt_wav`（文件名）与 `prompt_text`，并重启插件生效。
 
@@ -94,13 +111,18 @@ python3 pack.py
 
 ```
 astrbot_plugin_cosyvoice/
-├── main.py            # Star 入口：钩子 + 指令 + 工具
+├── main.py            # Star 入口：钩子 + 指令 + 工具 + WebUI 后端 API 注册
 ├── skills/cosyvoice_voice_mode/SKILL.md  # 内置 Skill：引导 LLM 语义触发语音工具（大写文件名+子目录，符合 AstrBot 规范）
 ├── metadata.yaml
 ├── _conf_schema.json
 ├── PLAN.md
+├── .astrbot-plugin/i18n/   # 插件 Pages 国际化资源（zh/en/ja/ko）
+├── pages/cosyvoice/        # WebUI 前端构建产物（AstrBot 自动发现为插件 Page）
+├── frontend/               # WebUI 前端源码（Vue3+Vite，构建产物输出到 pages/cosyvoice/，不打进 zip）
+├── core/
+│   ├── webapi.py           # WebUI 后端 API（register_web_apis）
+│   └── tts_engine.py
 ├── deploy/                 # CosyVoice 服务端：cosyvoice_api.py + 启动脚本 + 部署文档
 ├── cosyvoice/client.py
-├── core/tts_engine.py
 └── utils/audio.py
 ```

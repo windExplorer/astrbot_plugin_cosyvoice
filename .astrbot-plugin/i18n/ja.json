@@ -1,0 +1,61 @@
+{
+  "pages": {
+    "cosyvoice": {
+      "title": "CosyVoice 音声管理",
+      "description": "CosyVoice の音声・セッション TTS 状態・試聴を管理",
+      "overview": {
+        "tab": "概要",
+        "serverDown": "音声サーバーに接続できません（クールダウン中）",
+        "cooldownDesc": "次の TTS まで残り {time} 秒",
+        "health": "サーバー状態",
+        "noServer": "サーバー情報がありません",
+        "global": "全体設定",
+        "autoTts": "自動音声",
+        "sendMode": "送信モード",
+        "scope": "対象範囲",
+        "defaultVoice": "デフォルト音声",
+        "sampleRate": "サンプルレート",
+        "stats": "統計",
+        "voiceCount": "音声数",
+        "sessionCount": "有効なセッション",
+        "baseUrl": "サーバー URL",
+        "refresh": "更新"
+      },
+      "voices": {
+        "tab": "音声管理",
+        "note": "音声リストはプラグイン設定から取得します。WebUI ではショートカット操作と試聴を提供します。非表示・デフォルトは即時反映されますが、再起動後は設定に従います。",
+        "name": "音声名",
+        "promptWav": "参照音声",
+        "promptText": "参照テキスト",
+        "wavResolved": "WAV 到達",
+        "hidden": "非表示",
+        "actions": "操作",
+        "listen": "試聴",
+        "default": "デフォルト",
+        "setDefault": "デフォルトに設定",
+        "preview": "試聴",
+        "previewPlaceholder": "試聴するテキストを入力",
+        "synthesize": "合成して試聴",
+        "downloadMode": "この環境では試聴ファイルをダウンロードして再生してください",
+        "previewError": "試聴合成に失敗しました"
+      },
+      "sessions": {
+        "tab": "セッション管理",
+        "search": "セッション検索（origin）",
+        "batchOff": "一覧を一括でオフ",
+        "origin": "セッション",
+        "on": "音声オン",
+        "voice": "音声",
+        "sendMode": "送信モード",
+        "followGlobal": "全体に従う",
+        "noneOn": "一覧に音声オンのセッションがありません",
+        "batchDone": "{count} セッションをオフにしました"
+      },
+      "common": {
+        "cancel": "キャンセル",
+        "refresh": "更新",
+        "close": "閉じる"
+      }
+    }
+  }
+}

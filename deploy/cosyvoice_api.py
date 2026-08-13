@@ -29,6 +29,9 @@ import json
 import os
 import sys
 import tempfile
+import time
+import uuid
+import wave
 from typing import Optional
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -37,7 +40,7 @@ sys.path.insert(0, os.path.join(ROOT_DIR, "third_party", "Matcha-TTS"))
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
 
 from cosyvoice.cli.cosyvoice import AutoModel
 from cosyvoice.utils.file_utils import load_wav, logging
@@ -53,6 +56,28 @@ cosyvoice = None
 SAMPLE_RATE = 24000
 VOICES_DIR = os.path.join(ROOT_DIR, "cosyvoice_voices")
 VOICES_JSON = os.path.join(VOICES_DIR, "voices.json")
+# 试听/直链预览音频目录：POST /synthesize_save 合成后存这里，GET /audio/<name> 提供下载。
+PREVIEW_DIR = os.path.join(ROOT_DIR, "cosyvoice_previews")
+PREVIEW_TTL_SECONDS = 24 * 3600  # 预览文件保留时长（24h），定时清理
+
+
+def _cleanup_previews():
+    """删除超过 TTL 的预览音频文件，避免磁盘无限增长。"""
+    try:
+        if not os.path.isdir(PREVIEW_DIR):
+            return
+        now = time.time()
+        for f in os.listdir(PREVIEW_DIR):
+            fp = os.path.join(PREVIEW_DIR, f)
+            if not os.path.isfile(fp):
+                continue
+            try:
+                if now - os.path.getmtime(fp) > PREVIEW_TTL_SECONDS:
+                    os.remove(fp)
+            except OSError:
+                continue
+    except OSError as e:
+        logging.warning(f"清理预览文件失败: {e}")
 
 
 def _load_model(model_dir: str):
@@ -160,6 +185,77 @@ def list_voices():
     return {"voices_dir": VOICES_DIR, "files": files, "texts": {f: mapping.get(f, "") for f in files}}
 
 
+@app.get("/audio/{name}")
+def get_preview_audio(name: str):
+    """提供合成的预览音频（wav）下载，带缓存头以便浏览器本地缓存。"""
+    safe = os.path.basename(str(name))
+    path = os.path.join(PREVIEW_DIR, safe)
+    if not os.path.isfile(path):
+        return Response("not found", status_code=404)
+    return FileResponse(
+        path,
+        media_type="audio/wav",
+        headers={
+            "Cache-Control": "public, max-age=86400",
+            "Content-Disposition": f'inline; filename="{safe}"',
+        },
+    )
+
+
+@app.post("/synthesize_save")
+async def synthesize_save(
+    tts_text: str = Form(...),
+    prompt_text: str = Form(""),
+    prompt_wav: Optional[UploadFile] = File(None),
+    prompt_wav_path: str = Form(""),
+):
+    """合成并以 wav 保存，返回可直连下载的 URL（供 WebUI 试听）。
+
+    参数与 /inference_zero_shot 完全一致；响应体为
+    ``{"url": "/audio/<uuid>.wav", "sample_rate": 24000}``。
+    前端可直接把 url 放到 <audio> 播放（浏览器自动缓存，服务端本机直连）。
+    """
+    if cosyvoice is None:
+        return Response("model not loaded", status_code=503)
+    try:
+        prompt_speech = _resolve_prompt_speech(prompt_wav, prompt_wav_path)
+        prompt_text = _resolve_prompt_text(prompt_text, prompt_wav_path)
+        if not prompt_text:
+            logging.warning(
+                f"[synthesize_save] 缺少参考文本: prompt_text为空且voices.json未配置, "
+                f"prompt_wav_path={prompt_wav_path or '(上传)'}"
+            )
+            return Response("缺少参考文本：请在请求中传 prompt_text，或在 voices.json 配置该文件的文本", status_code=400)
+    except (FileNotFoundError, ValueError) as e:
+        logging.warning(f"[synthesize_save] 音频解析失败: {e}")
+        return Response(str(e), status_code=400)
+    logging.info(f"[synthesize_save] tts_text={tts_text[:40]}..., prompt_text={prompt_text[:40]}...")
+    async with _SYNTH_LOCK:
+        gen = await asyncio.to_thread(
+            cosyvoice.inference_zero_shot, tts_text, prompt_text, prompt_speech, False
+        )
+        pcm = await asyncio.to_thread(_synthesize, gen)
+    if not pcm:
+        return Response("empty audio", status_code=500)
+
+    os.makedirs(PREVIEW_DIR, exist_ok=True)
+    name = f"{uuid.uuid4().hex}.wav"
+    path = os.path.join(PREVIEW_DIR, name)
+    try:
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(SAMPLE_RATE)
+            # _synthesize 恒返回 int16 PCM bytes（见 _synthesize 末尾 tobytes()）
+            wf.writeframes(bytes(pcm))
+    except Exception as e:  # noqa: BLE001
+        logging.error(f"[synthesize_save] 写 wav 失败: {e}")
+        return Response("write wav failed", status_code=500)
+
+    _cleanup_previews()
+    return {"url": f"/audio/{name}", "sample_rate": SAMPLE_RATE}
+
+
 @app.post("/inference_zero_shot")
 async def inference_zero_shot(
     tts_text: str = Form(...),
@@ -240,6 +336,8 @@ def main():
     VOICES_DIR = args.voices_dir
     VOICES_JSON = os.path.join(VOICES_DIR, "voices.json")
     os.makedirs(VOICES_DIR, exist_ok=True)
+    os.makedirs(PREVIEW_DIR, exist_ok=True)
+    _cleanup_previews()
 
     _load_model(args.model_dir)
     logging.info(f"启动 API 服务: http://{args.host}:{args.port}, voices_dir={VOICES_DIR}")

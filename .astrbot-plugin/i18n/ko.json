@@ -1,0 +1,61 @@
+{
+  "pages": {
+    "cosyvoice": {
+      "title": "CosyVoice 음성 관리",
+      "description": "CosyVoice 음성, 세션 TTS 상태, 미리듣기 관리",
+      "overview": {
+        "tab": "개요",
+        "serverDown": "음성 서버에 연결할 수 없음(쿨다운 중)",
+        "cooldownDesc": "다음 TTS까지 남은 시간 {time}초",
+        "health": "서버 상태",
+        "noServer": "서버 정보 없음",
+        "global": "전역 설정",
+        "autoTts": "자동 음성",
+        "sendMode": "전송 방식",
+        "scope": "적용 범위",
+        "defaultVoice": "기본 음성",
+        "sampleRate": "샘플링 레이트",
+        "stats": "통계",
+        "voiceCount": "음성 수",
+        "sessionCount": "활성 세션",
+        "baseUrl": "서버 URL",
+        "refresh": "새로고침"
+      },
+      "voices": {
+        "tab": "음성 관리",
+        "note": "음성 목록은 플러그인 설정에서 제공됩니다. WebUI는 빠른 작업과 미리듣기를 제공합니다. 숨김/기본 설정은 즉시 적용되지만 재시작 후 설정을 따릅니다.",
+        "name": "음성명",
+        "promptWav": "기준 음성",
+        "promptText": "기준 텍스트",
+        "wavResolved": "WAV 도달",
+        "hidden": "숨김",
+        "actions": "작업",
+        "listen": "미리듣기",
+        "default": "기본",
+        "setDefault": "기본으로 설정",
+        "preview": "미리듣기",
+        "previewPlaceholder": "미리들을 텍스트 입력",
+        "synthesize": "합성 미리듣기",
+        "downloadMode": "이 환경에서는 미리듣기 파일을 다운로드하여 재생하세요",
+        "previewError": "미리듣기 합성 실패"
+      },
+      "sessions": {
+        "tab": "세션 관리",
+        "search": "세션 검색(origin)",
+        "batchOff": "목록 일괄 끄기",
+        "origin": "세션",
+        "on": "음성 켜기",
+        "voice": "음성",
+        "sendMode": "전송 방식",
+        "followGlobal": "전역 설정 따름",
+        "noneOn": "목록에 음성이 켜진 세션이 없습니다",
+        "batchDone": "{count}개 세션을 껐습니다"
+      },
+      "common": {
+        "cancel": "취소",
+        "refresh": "새로고침",
+        "close": "닫기"
+      }
+    }
+  }
+}

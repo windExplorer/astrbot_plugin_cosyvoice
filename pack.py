@@ -24,7 +24,7 @@ import zipfile
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_NAME = os.path.basename(ROOT)
 
-EXCLUDE_DIRS = {".git", "__pycache__", ".venv", "node_modules", "dist"}
+EXCLUDE_DIRS = {".git", "__pycache__", ".venv", "node_modules", "dist", "frontend"}
 EXCLUDE_FILES = {"pack.py", "pack.sh", "pack.bat"}
 EXCLUDE_SUFFIXES = (".pyc", ".pyo")
 

@@ -29,6 +29,7 @@ except Exception:  # noqa: BLE001
     LLMResponse = object  # type: ignore
 
 from .core.tts_engine import TtsEngine, is_speakable, clean_media_placeholders, clean_tts_text
+from .core.webapi import register_web_apis
 from .cosyvoice.client import CosyVoiceClient, CosyVoiceServerError, QueueFullError
 from .cosyvoice.router import CosyVoiceRouter
 from .utils import audio
@@ -93,6 +94,10 @@ class CosyVoicePlugin(Star):
         # 未设置 = 跟随全局 send_mode（配置项「语音发送方式」）
         self._sendmode_file = os.path.join(data_dir, "tts_sendmodes.json")
         self._sendmodes = self._load_sendmodes()
+        # WebUI 设置的最默认音色（按插件自有 data/ 持久，与 AstrBot 主配置解耦）：
+        # 存在时优先于配置项 default_voice；聊天/WebUI 都可覆盖。
+        self._default_voice_file = os.path.join(data_dir, "tts_default_voice.json")
+        self._default_voice_override = self._load_default_voice_override()
 
     def _data_dir(self) -> str:
         """持久数据目录。
@@ -128,6 +133,11 @@ class CosyVoicePlugin(Star):
             f"开关文件存在={os.path.exists(self._session_file)} "
             f"音色文件存在={os.path.exists(self._voice_file)}"
         )
+        # 注册 WebUI 后端 API（AstrBot 插件 Pages）
+        try:
+            register_web_apis(self)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[cosyvoice] WebUI API 注册失败（不影响语音功能）: {e}")
 
     # ---------- 事件标记辅助 ----------
     def _key(self, event: AstrMessageEvent):
@@ -240,6 +250,26 @@ class CosyVoicePlugin(Star):
         with open(self._voice_file, "w", encoding="utf-8") as f:
             json.dump(self._voices, f, ensure_ascii=False, indent=2)
 
+    # ---------- WebUI 设置的默认音色（与 AstrBot 主配置解耦，data/ 持久） ----------
+    def _load_default_voice_override(self) -> str:
+        try:
+            with open(self._default_voice_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return str(data.get("default_voice") or "").strip()
+        except Exception:
+            return ""
+
+    def _save_default_voice_override(self, name: str = ""):
+        os.makedirs(os.path.dirname(self._default_voice_file), exist_ok=True)
+        with open(self._default_voice_file, "w", encoding="utf-8") as f:
+            json.dump({"default_voice": name}, f, ensure_ascii=False, indent=2)
+
+    def _effective_default_voice(self) -> str:
+        """实际默认音色：WebUI override 优先，否则取配置 default_voice。"""
+        if self._default_voice_override:
+            return self._default_voice_override
+        return str(self.config.get("default_voice", "") or "")
+
     def _session_voice(self, event: AstrMessageEvent) -> str | None:
         return self._voices.get(event.unified_msg_origin)
 
@@ -275,6 +305,9 @@ class CosyVoicePlugin(Star):
         # 这样即使 get_config() 不返回 template_list/默认值字段，也不会丢失已配置的音色。
         merged = dict(self._injected_config)
         merged.update({k: v for k, v in live.items() if v is not None})
+        # WebUI 设置的默认音色（data/ 持久）优先于配置项 default_voice
+        if self._default_voice_override:
+            merged["default_voice"] = self._default_voice_override
         self.config = merged
         self.engine.config = merged
         self.engine.update_voices(merged.get("voices") or {})

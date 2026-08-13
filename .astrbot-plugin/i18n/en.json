@@ -1,0 +1,61 @@
+{
+  "pages": {
+    "cosyvoice": {
+      "title": "CosyVoice Voice Manager",
+      "description": "Manage CosyVoice voices, session TTS states, and previews",
+      "overview": {
+        "tab": "Overview",
+        "serverDown": "TTS server unreachable (cooling down)",
+        "cooldownDesc": "{time}s left before next TTS request",
+        "health": "Server Health",
+        "noServer": "No server info",
+        "global": "Global Config",
+        "autoTts": "Auto TTS",
+        "sendMode": "Send Mode",
+        "scope": "TTS Scope",
+        "defaultVoice": "Default Voice",
+        "sampleRate": "Sample Rate",
+        "stats": "Stats",
+        "voiceCount": "Voices",
+        "sessionCount": "Sessions On",
+        "baseUrl": "Server URL",
+        "refresh": "Refresh"
+      },
+      "voices": {
+        "tab": "Voices",
+        "note": "Voice list comes from plugin config; WebUI offers quick actions and previews. Hidden/default take effect immediately but are reset on reload.",
+        "name": "Voice",
+        "promptWav": "Prompt WAV",
+        "promptText": "Prompt Text",
+        "wavResolved": "WAV Reachable",
+        "hidden": "Hidden",
+        "actions": "Actions",
+        "listen": "Preview",
+        "default": "Default",
+        "setDefault": "Set Default",
+        "preview": "Preview",
+        "previewPlaceholder": "Enter text to preview",
+        "synthesize": "Synthesize",
+        "downloadMode": "Current environment downloads the preview; play the downloaded file",
+        "previewError": "Preview synthesis failed"
+      },
+      "sessions": {
+        "tab": "Sessions",
+        "search": "Search session (origin)",
+        "batchOff": "Turn Off Listed",
+        "origin": "Session",
+        "on": "TTS On",
+        "voice": "Voice",
+        "sendMode": "Send Mode",
+        "followGlobal": "Follow Global",
+        "noneOn": "No session with TTS enabled in the list",
+        "batchDone": "Turned off {count} sessions"
+      },
+      "common": {
+        "cancel": "Cancel",
+        "refresh": "Refresh",
+        "close": "Close"
+      }
+    }
+  }
+}

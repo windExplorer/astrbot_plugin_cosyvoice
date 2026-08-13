@@ -92,6 +92,8 @@ uv run python cosyvoice_api.py \
 | GET | `/voices` | 列出 `--voices_dir` 中的文件及文本映射，便于核对 |
 | POST | `/inference_zero_shot` | zero-shot 克隆合成 |
 | POST | `/inference_instruct2` | 带指令的合成（按模型支持） |
+| POST | `/synthesize_save` | 合成并存为 wav，返回 **可直连 URL**（供插件 WebUI 试听） |
+| GET | `/audio/{name}` | 下载/播放刚才合成的预览 wav（带缓存头） |
 
 `/inference_zero_shot` 表单字段：
 
@@ -106,6 +108,16 @@ uv run python cosyvoice_api.py \
 \** `prompt_wav` 与 `prompt_wav_path` 至少给一个；两者都缺返回 400。
 
 响应为**裸 int16 PCM 字节流**（24kHz 单声道，无 WAV 头），由插件端补 WAV 头。
+
+`/synthesize_save` 参数与 `/inference_zero_shot` **完全一致**，区别是返回：
+
+```json
+{ "url": "/audio/ab12cd34.wav", "sample_rate": 24000 }
+```
+
+- 音频（wav）保存到脚本同目录 `cosyvoice_previews/`，通过 `/audio/{name}` 对外提供；
+- 每次合成会顺带清理 24 小时前的旧预览文件（磁盘不会无限增长）；
+- 插件 WebUI 的「试听」用它拿直链，浏览器 `<audio>` 直连播放并**本地缓存**（`Cache-Control: public, max-age=86400`）。
 
 ---
 
