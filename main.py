@@ -107,6 +107,8 @@ class CosyVoicePlugin(Star):
         # 让 WebUI 能独立管理音色，不被 _refresh_cfg 用配置覆盖。
         self._voices_lib_file = os.path.join(data_dir, "tts_voices_lib.json")
         self._voices_lib = self._load_voices_lib()
+        # WebUI 概览「最近事件」环形缓冲（进程内，不持久化；最多 20 条）
+        self._recent_events = []
 
     def _data_dir(self) -> str:
         """持久数据目录。
@@ -171,6 +173,24 @@ class CosyVoicePlugin(Star):
             self._last_llm.pop(origin, None)
             self._last_user_msg.pop(origin, None)
 
+    def _push_event(self, ok: bool, msg: str):
+        """记录一条『最近事件』（进程内环形缓冲，供 WebUI 概览展示）。
+
+        仅内存保存（最多 20 条，最新在前），不持久化；插件重载即清空，
+        定位为实时健康流水，而非审计日志。
+        """
+        ev = getattr(self, "_recent_events", None)
+        if ev is None:
+            ev = []
+            self._recent_events = ev
+        ev.insert(0, {
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "ok": bool(ok),
+            "msg": str(msg)[:200],
+        })
+        if len(ev) > 20:
+            del ev[20:]
+
     def _mark_server_ok(self):
         """合成成功：解除熔断冷却，并复位失联提示标志，便于下次真的失联时再提示。"""
         self._server_cooldown_until = 0.0
@@ -200,6 +220,7 @@ class CosyVoicePlugin(Star):
             f"[cosyvoice] 进入冷却 | send_mode={send_mode} text_in_chain={text_in_chain}"
         )
         self._trip_breaker()
+        self._push_event(False, tip)
         if not self._server_down:
             self._server_down = True
             try:
@@ -787,6 +808,7 @@ class CosyVoicePlugin(Star):
             if bucket and len(bucket) > 20:
                 self._decorated[origin] = set(list(bucket)[-20:])
             logger.info("[cosyvoice] 后台语音合成完成，已补发")
+            self._push_event(True, "后台语音合成完成并已发送")
         except QueueFullError:
             # 排队过长：服务端在线但繁忙，进冷却避免反复打繁忙服务器，提示稍后再试
             logger.warning("[cosyvoice] 语音服务器繁忙（排队过长），进入冷却并回退文字")
@@ -881,17 +903,22 @@ class CosyVoicePlugin(Star):
                 audio.schedule_cleanup(wav)
             if not sent:
                 yield event.plain_result(empty_hint)
+            else:
+                self._push_event(True, "指令语音已发送")
         except QueueFullError:
             # 排队过长：服务端在线但繁忙，进冷却避免反复打繁忙服务器，提示稍后再试
             self._trip_breaker([])
             logger.warning("[cosyvoice] 指令合成服务器繁忙（排队过长），进入冷却")
+            self._push_event(False, SERVER_BUSY_TIP)
             yield event.plain_result(SERVER_BUSY_TIP)
         except CosyVoiceServerError:
             self._trip_breaker([])
+            self._push_event(False, SERVER_DOWN_TIP)
             yield event.plain_result(SERVER_DOWN_TIP)
         except Exception as e:
             # 偶发错误（如连接中途断开）不进熔断，仅提示本条失败，可重试
             logger.warning(f"[cosyvoice] 指令合成失败（本条跳过）: {e}")
+            self._push_event(False, f"指令合成失败：{e}")
             yield event.plain_result(empty_hint)
 
     @filter.command("tts")
@@ -1197,21 +1224,25 @@ class CosyVoicePlugin(Star):
                     await self._realtime_send(event, [Comp.Plain("话到嘴边卡壳了，这次没念出来，待会儿再试试？")])
                     return "语音合成失败，已告知用户。"
             self._mark_server_ok()
+            self._push_event(True, "已用语音朗读并发送")
             return "已用语音朗读，语音已发送给用户。"
         except QueueFullError:
             # 排队过长：服务端在线但繁忙，进冷却避免反复打繁忙服务器，提示稍后再试
             self._trip_breaker()
             logger.warning("[cosyvoice] text_to_speech 服务器繁忙（排队过长），进入冷却")
+            self._push_event(False, SERVER_BUSY_TIP)
             await self._realtime_send(event, [Comp.Plain(SERVER_BUSY_TIP)])
             return "语音服务器繁忙（排队过长），已用文字告知用户。"
         except CosyVoiceServerError:
             self._trip_breaker()
             logger.warning("[cosyvoice] text_to_speech 服务器失联，进入冷却")
+            self._push_event(False, SERVER_DOWN_TIP)
             await self._realtime_send(event, [Comp.Plain(SERVER_DOWN_TIP)])
             return "语音服务器失联，已用文字告知用户。"
         except Exception as e:
             # 偶发错误（如连接中途断开）不进熔断，仅提示本条失败，可重试
             logger.warning(f"[cosyvoice] text_to_speech 合成失败（本条跳过）: {e}")
+            self._push_event(False, f"语音合成失败：{e}")
             await self._realtime_send(event, [Comp.Plain("话到嘴边卡壳了，这次没念出来，待会儿再试试？")])
             return "语音合成失败，已告知用户。"
 

@@ -486,22 +486,22 @@ class TtsEngine:
         return chunks
 
     # ---------- 合成 ----------
-    async def _maybe_translate(self, text: str) -> str:
-        """合成前按需翻译：把非目标语种的文本翻成目标语言（默认汉语）。
+    async def _maybe_translate(self, text: str, voice_lang: str | None = None) -> str:
+        """合成前按需翻译：把文本翻成目标语种（默认全局 target；传入 voice_lang 时
+        翻成该音色语种，实现「中文 → 音色语种」）。任何异常都回退原文。
 
-        任何异常都回退原文，绝不影响语音合成主流程。
+        voice_lang：所选音色的语种（来自 voices 配置的 language 字段）。
         """
         if self.translator is None:
             return text
         try:
-            return await self.translator.maybe_translate(text)
+            return await self.translator.maybe_translate(text, target=voice_lang)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[cosyvoice] 翻译接入异常，回退原文: {e}")
             return text
 
     async def synthesize(self, text: str, voice_name: str | None = None) -> str | None:
         """合成文本并返回 wav 文件路径；无可用音色或失败返回 None。"""
-        text = await self._maybe_translate(text)
         name, prompt_wav, prompt_text = self.resolve_voice(voice_name)
         if name is None:
             logger.warning(
@@ -509,6 +509,9 @@ class TtsEngine:
                 f"运行实例读到的 raw voices={repr(self.config.get('voices'))[:300]}"
             )
             return None
+        # 先按音色语种翻译（中文文本 + 外语音色 → 翻成该语种），再分段合成
+        vlang = (self.voices.get(name) or {}).get("language") or None
+        text = await self._maybe_translate(text, voice_lang=vlang)
 
         chunks = [c for c in self.split_text(text) if is_speakable(c)]
         if not chunks:
@@ -567,6 +570,9 @@ class TtsEngine:
                 f"运行实例读到的 raw voices={repr(self.config.get('voices'))[:300]}"
             )
             return
+        # 不合并模式同样先按音色语种翻译，再分段合成（保证逐段发送也是译后文本）
+        vlang = (self.voices.get(name) or {}).get("language") or None
+        text = await self._maybe_translate(text, voice_lang=vlang)
         chunks = [c for c in self.split_text(text) if is_speakable(c)]
         if not chunks:
             logger.debug("[cosyvoice] 无有效可合成文本，跳过语音合成")

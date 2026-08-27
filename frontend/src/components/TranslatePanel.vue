@@ -101,6 +101,19 @@
           </div>
         </el-form-item>
 
+        <el-divider content-position="left">语种代码映射</el-divider>
+        <el-form-item label="代码映射">
+          <div class="cv-kvlist">
+            <div v-for="(m, i) in config.lang_map" :key="'m' + i" class="cv-kvrow">
+              <el-input v-model="m.key" placeholder="简码，如 zh" />
+              <el-input v-model="m.value" placeholder="接口码，如 zh-CN" />
+              <el-button text type="danger" :icon="Minus" @click="rmRow(config.lang_map, i)" />
+            </div>
+            <el-button text type="primary" :icon="Plus" @click="addRow(config.lang_map)">添加映射</el-button>
+          </div>
+          <div class="cv-muted" style="width: 100%">插件输出简码（zh/en/ja/ko/ru/th/ar/hi）；若翻译接口要带区域码（如 zh-CN），在此把简码映射成接口码，作用于 {source}/{target}。</div>
+        </el-form-item>
+
         <el-divider content-position="left">响应解析</el-divider>
         <el-form-item label="译文路径">
           <el-input v-model="config.api.response_path" placeholder="data.trans_result[0].dst" />
@@ -179,6 +192,7 @@ const config = reactive({
   enabled: false,
   target: 'zh',
   source: [],
+  lang_map: [],
   api: emptyApi(),
 })
 
@@ -195,6 +209,7 @@ async function load() {
     config.enabled = !!r.enabled
     config.target = r.target || 'zh'
     config.source = Array.isArray(r.source) ? r.source : []
+    config.lang_map = Array.isArray(r.lang_map) ? r.lang_map : []
     Object.assign(config.api, emptyApi(), r.api || {})
   } catch (e) {
     ElMessage.error('加载翻译配置失败：' + e)

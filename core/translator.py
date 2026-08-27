@@ -101,23 +101,34 @@ class Translator:
         ]
         self.response_path = (api.get("response_path") or "").strip()
         self.timeout = float(api.get("timeout") or 15)
+        # 语种代码映射：简码 → 接口要求的代码（如 zh → zh-CN）；同时作用于 {source}/{target}
+        self.lang_map = {
+            str(k).strip().lower(): str(v).strip()
+            for k, v in (config.get("lang_map") or [])
+            if str(k).strip() and str(v).strip()
+        }
         # 译文缓存：origin -> translated（配置热更新时清空，避免旧译文滞留）
         self._cache: dict = {}
 
     # ------------------------------------------------------------------ #
     # 对外入口
     # ------------------------------------------------------------------ #
-    async def maybe_translate(self, text: str) -> str:
-        """需要翻译才翻译，否则原样返回；任何异常都回退原文。"""
+    async def maybe_translate(self, text: str, target: str | None = None) -> str:
+        """需要翻译才翻译，否则原样返回；任何异常都回退原文。
+
+        target：目标语种，覆盖配置里的全局 target。合成时由调用方传入所选
+        音色的语种，实现「中文 → 音色语种」；为 None 时回落到全局 target。
+        """
         if not self.enabled or not self.api_url:
             return text
+        dst = (target or self.target).strip().lower() or self.target
         src = detect_lang(text)
-        if not self._should_translate(src):
+        if not self._should_translate(src, dst):
             return text
         if text in self._cache:
             return self._cache[text]
         try:
-            translated = await self._call_api(text, src, self.target)
+            translated = await self._call_api(text, src, dst)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[cosyvoice-translate] 翻译失败，回退原文: {e}")
             return text
@@ -126,14 +137,14 @@ class Translator:
         self._cache[text] = translated
         return translated
 
-    def _should_translate(self, src: str) -> bool:
-        """是否需要对 src 语种翻译：
+    def _should_translate(self, src: str, dst: str) -> bool:
+        """是否需要对 src 语种翻译（dst 为目标语种）：
 
         - src 就是目标语言 → 不翻
         - 未配置 source 白名单 → 除目标语言外全部翻
         - 配置了 source 白名单 → 仅白名单内的语种翻
         """
-        if src == self.target:
+        if src == dst:
             return False
         if not self.source:
             return True
@@ -143,6 +154,9 @@ class Translator:
     # 请求构建 + 调用
     # ------------------------------------------------------------------ #
     async def _call_api(self, text: str, src: str, dst: str) -> str:
+        # 语种代码映射：把简码换成接口要求的代码（zh → zh-CN 等）
+        src = self.lang_map.get(src, src)
+        dst = self.lang_map.get(dst, dst)
         def fill(v):
             return (
                 str(v)
@@ -207,15 +221,16 @@ class Translator:
         if not self.enabled:
             return {"ok": False, "error": "翻译开关未开启"}
         src = detect_lang(sample)
+        dst = self.target
         info = {
             "detected_lang": src,
-            "target_lang": self.target,
-            "should_translate": self._should_translate(src),
+            "target_lang": dst,
+            "should_translate": self._should_translate(src, dst),
         }
         if not info["should_translate"]:
             return {"ok": True, "skipped": True, **info, "result": sample}
         try:
-            translated = await self._call_api(sample, src, self.target)
+            translated = await self._call_api(sample, src, dst)
             info["result"] = translated
             info["ok"] = True
         except Exception as e:  # noqa: BLE001

@@ -102,7 +102,31 @@ def _overview(plugin):
         cooldown_until = getattr(plugin, "_server_cooldown_until", 0.0)
         remaining = max(0.0, cooldown_until - time.time()) if cooldown_until else 0.0
 
+        # 前端概览面板（OverviewPanel）期望的扁平字段：与前端契约对齐
+        sm_mode = cfg.get("send_mode", "both")
+        client_ready = not bool(getattr(plugin, "_server_down", False))
+        client_error = ""
+        if getattr(plugin, "_server_cooldown_until", 0.0) and time.time() < plugin._server_cooldown_until:
+            client_error = "语音服务端冷却中（近期合成失败），稍后自动恢复"
+        send_modes = ["语音+文字", "仅语音"] if sm_mode == "both" else ["仅语音", "语音+文字"]
+
         return json_response({
+            # ---- OverviewPanel 概览（扁平字段，与前端契约对齐）----
+            "client_ready": client_ready,
+            "client_error": client_error,
+            "base_url": cfg.get("base_url", ""),
+            "default_voice": plugin._effective_default_voice(),
+            "send_mode": sm_mode,
+            "concurrent_sessions": int(cfg.get("tts_concurrency", 1) or 1),
+            "servers_count": len(servers),
+            "voices_count": len(plugin.engine.voices),
+            "auto_tts_enabled": bool(cfg.get("auto_tts", False)),
+            "auto_tts_reply": bool(cfg.get("auto_tts", False)),
+            "auto_tts_keywords": list(cfg.get("trigger_keywords", []) or []),
+            "auto_tts_mention": bool(cfg.get("enable_user_trigger", True)),
+            "send_modes": send_modes,
+            "recent_events": list(getattr(plugin, "_recent_events", []) or []),
+            # ---- 兼容/扩展字段（其他面板或后续用）----
             "servers": servers,
             "cooldown_remaining": round(remaining, 1),
             "server_down": bool(getattr(plugin, "_server_down", False)),
