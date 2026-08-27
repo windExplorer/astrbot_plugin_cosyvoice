@@ -668,7 +668,7 @@ class CosyVoicePlugin(Star):
         # （voice_only / 不合并 both），用户看不到括号内容，单独补发一条文字。
         speak_text = full_text
         if cfg.get("skip_bracket_tts", True):
-            bracket_text = _extract_brackets(full_text)
+            bracket_text = self._extract_brackets(full_text)
             if bracket_text:
                 speak_text = _strip_brackets(full_text)
                 if not text_in_chain:

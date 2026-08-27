@@ -2,6 +2,10 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.0.5 (2026-08-28)
+
+- 修复运行时崩溃 `NameError: name '_extract_brackets' is not defined`：`on_decorating_result` 在 `skip_bracket_tts` 开启时会把括号内容单独发送为文字，但误将实例方法当作全局函数调用，导致 LLM 回复在「结果装饰/发送」阶段整段抛异常、消息发不出来。改为 `self._extract_brackets(...)` 调用修复。
+
 ## v2.0.4 (2026-08-28)
 
 - 修复 WebUI 会话页表格字段全部空白：前后端会话字段契约对齐（后端 /sessions 改为返回 id/user/on/mode/voice/prob，前端表格列相应调整）；并新增 sessions/delete、sessions/clear 端点，修复「删除 / 清空全部」按钮因端点不匹配而 404 的问题。
