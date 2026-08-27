@@ -120,9 +120,11 @@ def is_speakable(text: str) -> bool:
 
 
 class TtsEngine:
-    def __init__(self, config: dict, client: CosyVoiceClient, concurrency: int = 1):
+    def __init__(self, config: dict, client: CosyVoiceClient, translator=None, concurrency: int = 1):
         self.config = config
         self.client = client
+        # 翻译适配器（可选）：在合成前把非目标语种的文本翻成目标语言（默认汉语）。
+        self.translator = translator
         self.voices: dict = {}
         # 全局合成并发信号量：限制同时打到 TTS 服务端的请求数。
         # 弱服务端（GPU 推理）扛不住多并发，多用户同时触发时不限制会把服务端打爆
@@ -215,6 +217,7 @@ class TtsEngine:
                         "prompt_wav": v.get("prompt_wav", "") or "",
                         "prompt_text": v.get("prompt_text", "") or "",
                         "hidden": bool(v.get("hidden", False)),
+                        "language": (v.get("language") or "").strip().lower(),
                     }
         elif isinstance(voices, list):
             for item in voices:
@@ -227,6 +230,7 @@ class TtsEngine:
                     "prompt_wav": item.get("prompt_wav", "") or "",
                     "prompt_text": item.get("prompt_text", "") or "",
                     "hidden": bool(item.get("hidden", False)),
+                    "language": (item.get("language") or "").strip().lower(),
                 }
         return d
 
@@ -482,8 +486,22 @@ class TtsEngine:
         return chunks
 
     # ---------- 合成 ----------
+    async def _maybe_translate(self, text: str) -> str:
+        """合成前按需翻译：把非目标语种的文本翻成目标语言（默认汉语）。
+
+        任何异常都回退原文，绝不影响语音合成主流程。
+        """
+        if self.translator is None:
+            return text
+        try:
+            return await self.translator.maybe_translate(text)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[cosyvoice] 翻译接入异常，回退原文: {e}")
+            return text
+
     async def synthesize(self, text: str, voice_name: str | None = None) -> str | None:
         """合成文本并返回 wav 文件路径；无可用音色或失败返回 None。"""
+        text = await self._maybe_translate(text)
         name, prompt_wav, prompt_text = self.resolve_voice(voice_name)
         if name is None:
             logger.warning(

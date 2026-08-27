@@ -94,7 +94,9 @@ def main():
                 rel = os.path.relpath(fp, ROOT)
                 if _should_exclude(rel):
                     continue
-                arcname = os.path.join(PLUGIN_NAME, rel)
+                # 用正斜杠拼接归档名，避免 Windows 上 os.path.join 产生反斜杠，
+                # 导致 Linux 解压时把整个插件当成「带斜杠的文件」而非目录树。
+                arcname = "/".join([PLUGIN_NAME, *rel.split(os.sep)])
                 z.write(fp, arcname)
                 count += 1
 

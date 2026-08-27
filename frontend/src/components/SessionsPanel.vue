@@ -1,122 +1,97 @@
 ﻿<template>
-  <div>
-    <div class="toolbar">
-      <el-input
-        v-model="keyword"
-        :placeholder="'搜索会话（origin）'"
-        clearable
-        style="width: 280px"
-      />
-      <el-button :disabled="!filteredSessions.length" size="small" type="danger" plain @click="batchOff">
-        {{ '批量关闭当前列表' }}
-      </el-button>
-      <el-button size="small" @click="load">{{ '刷新' }}</el-button>
+  <div class="cv-page">
+    <div class="cv-card">
+      <div class="cv-toolbar">
+        <div class="cv-section-title" style="margin: 0">
+          <el-icon><ChatRound /></el-icon>会话列表
+        </div>
+        <span class="cv-muted">自动 TTS 按会话累积文本，到点/关键词触发合成</span>
+        <div class="cv-spacer" />
+        <el-button :icon="Delete" type="danger" plain @click="clearAll">清空全部</el-button>
+        <el-button :icon="Refresh" @click="load">刷新</el-button>
+      </div>
+      <el-table :data="sessions" v-loading="loading" stripe style="width: 100%">
+        <el-table-column prop="id" label="会话 ID" min-width="170" show-overflow-tooltip />
+        <el-table-column prop="user" label="用户" min-width="120" />
+        <el-table-column label="模式" min-width="90">
+          <template #default="{ row }">
+            <el-tag size="small" effect="light">{{ row.mode }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" min-width="90">
+          <template #default="{ row }">
+            <el-tag :type="row.timer_armed ? 'success' : 'info'" size="small" effect="light">
+              {{ row.timer_armed ? '待合成' : '空闲' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="chars" label="累计字数" min-width="90" />
+        <el-table-column prop="updated" label="更新时间" min-width="150" />
+        <el-table-column label="操作" min-width="110" fixed="right">
+          <template #default="{ row }">
+            <el-button size="small" :icon="Delete" type="danger" plain @click="remove(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-empty v-if="!loading && !sessions.length" description="暂无活跃会话" :image-size="70" />
     </div>
-
-    <el-table :data="filteredSessions" v-loading="loading" border size="small">
-      <el-table-column :label="'会话'" prop="origin" min-width="200" show-overflow-tooltip />
-      <el-table-column :label="'语音开关'" width="110" align="center">
-        <template #default="{ row }">
-          <el-switch :model-value="row.on" @change="(v) => setOn(row, v)" />
-        </template>
-      </el-table-column>
-      <el-table-column :label="'音色'" width="150">
-        <template #default="{ row }">
-          <el-select :model-value="row.voice || ''" placeholder="-" size="small" @change="(v) => setVoice(row, v)">
-            <el-option label="-" value="" />
-            <el-option v-for="v in allVoices" :key="v" :label="v" :value="v" />
-          </el-select>
-        </template>
-      </el-table-column>
-      <el-table-column :label="'发送方式'" width="140">
-        <template #default="{ row }">
-          <el-select :model-value="row.send_mode || ''" placeholder="跟随全局" size="small" @change="(v) => setSendMode(row, v)">
-            <el-option :label="'跟随全局'" value="" />
-            <el-option label="both" value="both" />
-            <el-option label="voice_only" value="voice_only" />
-          </el-select>
-        </template>
-      </el-table-column>
-    </el-table>
   </div>
 </template>
 
 <script setup>
-import { ref, inject, computed, onMounted } from 'vue'
-import bridge from '../api'
+import { ref, inject, onMounted } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { ChatRound, Delete, Refresh } from '@element-plus/icons-vue'
 
-const notify = inject('notify')
+const bridge = inject('bridge')
 const sessions = ref([])
-const allVoices = ref([])
 const loading = ref(false)
-const keyword = ref('')
-
-const filteredSessions = computed(() => {
-  const kw = keyword.value.trim().toLowerCase()
-  if (!kw) return sessions.value
-  return sessions.value.filter((s) => s.origin.toLowerCase().includes(kw))
-})
 
 async function load() {
   loading.value = true
   try {
-    const [s, v] = await Promise.all([
-      bridge.apiGet('sessions'),
-      bridge.apiGet('voices'),
-    ])
-    sessions.value = s.sessions || []
-    allVoices.value = (v.voices || []).map((x) => x.name)
+    const r = await bridge.apiGet('sessions')
+    sessions.value = r.sessions || []
   } catch (e) {
-    notify.error(e.message || 'load failed')
+    ElMessage.error('加载会话失败：' + e)
   } finally {
     loading.value = false
   }
 }
 
-async function setOn(row, v) {
+async function remove(row) {
   try {
-    await bridge.apiPost('sessions/set', { origin: row.origin, on: v })
-    row.on = v
-    notify.success(`on=${v}`)
-  } catch (e) {
-    notify.error(e.message || 'request failed')
-  }
-}
-
-async function setVoice(row, v) {
-  try {
-    await bridge.apiPost('sessions/set', { origin: row.origin, voice: v })
-    row.voice = v
-    notify.success(`voice=${v}`)
-  } catch (e) {
-    notify.error(e.message || 'request failed')
-  }
-}
-
-async function setSendMode(row, v) {
-  try {
-    await bridge.apiPost('sessions/set', { origin: row.origin, send_mode: v })
-    row.send_mode = v
-    notify.success(`send_mode=${v}`)
-  } catch (e) {
-    notify.error(e.message || 'request failed')
-  }
-}
-
-async function batchOff() {
-  const origins = filteredSessions.value.filter((s) => s.on).map((s) => s.origin)
-  if (!origins.length) {
-    notify.info('列表中没有开启语音的会话')
+    await ElMessageBox.confirm(`删除会话「${row.id}」？`, '删除确认', { type: 'warning' })
+  } catch {
     return
   }
   try {
-    await bridge.apiPost('sessions/batch_off', { origins })
-    load()
-    notify.success(`已关闭 ${origins.length} 个会话`)
+    await bridge.apiPost('sessions/delete', { id: row.id })
+    ElMessage.success('已删除')
+    await load()
   } catch (e) {
-    notify.error(e.message || '请求失败')
+    ElMessage.error('删除失败：' + e)
+  }
+}
+async function clearAll() {
+  try {
+    await ElMessageBox.confirm('清空所有会话？', '清空确认', { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    await bridge.apiPost('sessions/clear', {})
+    ElMessage.success('已清空')
+    await load()
+  } catch (e) {
+    ElMessage.error('清空失败：' + e)
   }
 }
 
 onMounted(load)
+defineExpose({ load })
 </script>
+
+<style scoped>
+.cv-page { display: flex; flex-direction: column; gap: 14px; }
+</style>

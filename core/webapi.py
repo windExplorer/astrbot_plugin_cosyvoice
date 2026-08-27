@@ -52,6 +52,8 @@ def register_web_apis(plugin) -> None:
     ctx.register_web_api(f"/{p}/sessions/set", _set_session(plugin), ["POST"], "按会话设置语音开关/音色/发送方式")
     ctx.register_web_api(f"/{p}/sessions/batch_off", _batch_off(plugin), ["POST"], "批量关闭会话语音")
     ctx.register_web_api(f"/{p}/synthesize", _synthesize(plugin), ["GET", "POST"], "合成试听（返回 wav 下载）")
+    ctx.register_web_api(f"/{p}/translate", _translate_config(plugin), ["GET", "POST"], "翻译配置（读取/保存）")
+    ctx.register_web_api(f"/{p}/translate/test", _translate_test(plugin), ["POST"], "翻译配置测试")
     logger.info(f"[cosyvoice] WebUI API 已注册（前缀 /api/plug/{p}/）")
 
 
@@ -178,6 +180,7 @@ def _list_voices(plugin):
                 "name": name,
                 "prompt_wav": v.get("prompt_wav", ""),
                 "prompt_text": v.get("prompt_text", ""),
+                "language": v.get("language", "") or "",
                 "hidden": bool(v.get("hidden", False)),
                 "is_default": name == default,
                 "in_lib": name in plugin._voices_lib,  # 是否由 WebUI 管理
@@ -196,6 +199,7 @@ def _create_voice(plugin):
         name = str(payload.get("name") or "").strip()
         prompt_wav = str(payload.get("prompt_wav") or "").strip()
         prompt_text = str(payload.get("prompt_text") or "").strip()
+        language = str(payload.get("language") or "").strip().lower()
         hidden = bool(payload.get("hidden", False))
         if not name:
             return error_response("音色名不能为空", status_code=400)
@@ -204,6 +208,7 @@ def _create_voice(plugin):
         plugin._voices_lib[name] = {
             "prompt_wav": prompt_wav,
             "prompt_text": prompt_text,
+            "language": language,
             "hidden": hidden,
         }
         plugin._save_voices_lib()
@@ -224,6 +229,7 @@ def _update_voice(plugin):
         entry = dict(plugin._voices_lib.get(name, {
             "prompt_wav": plugin.engine.voices.get(name, {}).get("prompt_wav", ""),
             "prompt_text": plugin.engine.voices.get(name, {}).get("prompt_text", ""),
+            "language": plugin.engine.voices.get(name, {}).get("language", ""),
             "hidden": bool(plugin.engine.voices.get(name, {}).get("hidden", False)),
         }))
         if "prompt_wav" in payload:
@@ -232,6 +238,8 @@ def _update_voice(plugin):
             entry["prompt_text"] = str(payload["prompt_text"] or "").strip()
         if "hidden" in payload:
             entry["hidden"] = bool(payload["hidden"])
+        if "language" in payload:
+            entry["language"] = str(payload["language"] or "").strip().lower()
         plugin._voices_lib[name] = entry
         plugin._save_voices_lib()
         plugin._refresh_cfg()
@@ -432,5 +440,52 @@ def _synthesize(plugin):
             target = wav_path
 
         return file_response(target, filename=f"cosyvoice_{safe_name}.wav", content_type="audio/wav")
+
+    return handler
+
+
+# ---------- 翻译配置 ----------
+def _translate_config(plugin):
+    async def handler():
+        if request.method == "POST":
+            payload = await request.json(default={})
+            plugin._save_translate_cfg(payload)
+            return json_response({"ok": True})
+        # GET：返回当前翻译配置（首次为空时返回默认骨架，便于前端填写）
+        cfg = plugin._load_translate_cfg()
+        if not cfg:
+            cfg = {
+                "enabled": False,
+                "target": "zh",
+                "source": [],
+                "api": {
+                    "url": "",
+                    "method": "POST",
+                    "apikey": "",
+                    "auth_header": "Authorization",
+                    "auth_scheme": "Bearer",
+                    "content_type": "json",
+                    "extra_headers": [],
+                    "params": [],
+                    "response_path": "",
+                    "timeout": 15,
+                },
+            }
+        return json_response(cfg)
+
+    return handler
+
+
+def _translate_test(plugin):
+    async def handler():
+        payload = await request.json(default={})
+        sample = str(payload.get("sample") or "").strip()
+        if not sample:
+            return error_response("请提供测试文本 sample", status_code=400)
+        try:
+            result = await plugin.translator.test(sample)
+        except Exception as e:  # noqa: BLE001
+            return error_response(f"翻译测试异常：{e}", status_code=500)
+        return json_response(result)
 
     return handler

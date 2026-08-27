@@ -30,6 +30,7 @@ except Exception:  # noqa: BLE001
 
 from .core.tts_engine import TtsEngine, is_speakable, clean_media_placeholders, clean_tts_text
 from .core.webapi import register_web_apis
+from .core.translator import Translator
 from .cosyvoice.client import CosyVoiceClient, CosyVoiceServerError, QueueFullError
 from .cosyvoice.router import CosyVoiceRouter
 from .utils import audio
@@ -66,6 +67,7 @@ class CosyVoicePlugin(Star):
         self._cooldown_sec = float(self.config.get("tts_cooldown_sec", 30))
         self.engine = TtsEngine(
             self.config, self.client,
+            translator=self.translator,
             concurrency=int(self.config.get("tts_concurrency", 1) or 1),
         )
         # 每个消息的事件标记（避免并发串台），以 message_id 为键
@@ -102,6 +104,9 @@ class CosyVoicePlugin(Star):
         # 让 WebUI 能独立管理音色，不被 _refresh_cfg 用配置覆盖。
         self._voices_lib_file = os.path.join(data_dir, "tts_voices_lib.json")
         self._voices_lib = self._load_voices_lib()
+        # 翻译配置（自有 data/ 持久，与 AstrBot 主配置解耦）：enable/target/source/api…
+        self._translate_file = os.path.join(data_dir, "translate_config.json")
+        self.translator = Translator(self._load_translate_cfg())
 
     def _data_dir(self) -> str:
         """持久数据目录。
@@ -334,6 +339,20 @@ class CosyVoicePlugin(Star):
         return cfg.get("send_mode", "both")
 
     # ---------- 工具方法 ----------
+    def _load_translate_cfg(self) -> dict:
+        """读取翻译配置（data/translate_config.json，自有持久，与 AstrBot 主配置解耦）。"""
+        try:
+            with open(self._translate_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_translate_cfg(self, cfg: dict):
+        """保存翻译配置并热更新 translator（无需重启立即生效）。"""
+        with open(self._translate_file, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        self.translator.reload(cfg)
+
     def _refresh_cfg(self) -> dict:
         live = self.context.get_config() or {}
         # 以注入的完整配置为基线，再用 get_config() 的实时值覆盖。
@@ -540,6 +559,18 @@ class CosyVoicePlugin(Star):
             if any(kw and kw in msg for kw in text_kw):
                 self._set_flag(event, "suppress", True)
 
+    # ---------- 括号内容不朗读（模块级工具） ----------
+    _BRACKET_RE = re.compile(r"[（(\[](.*?)[）)\]]", re.DOTALL)
+
+    def _strip_brackets(text: str) -> str:
+        """移除所有被括号包裹的内容（含括号本身），用于不进入语音合成。"""
+        return _BRACKET_RE.sub("", text)
+
+    def _extract_brackets(text: str) -> str:
+        """提取所有括号内容，按出现顺序拼接成可单独发送的文字（换行分隔）。"""
+        parts = [p.strip() for p in _BRACKET_RE.findall(text) if p and p.strip()]
+        return "\n".join(parts)
+
     # ---------- 装饰结果钩子：不阻塞管线，文字立刻发，语音后台补 ----------
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):
@@ -612,6 +643,22 @@ class CosyVoicePlugin(Star):
         if not text_in_chain:
             result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
 
+        # 括号内容不朗读：从合成文本剥离括号内容；若当前文字不在结果链
+        # （voice_only / 不合并 both），用户看不到括号内容，单独补发一条文字。
+        speak_text = full_text
+        if cfg.get("skip_bracket_tts", True):
+            bracket_text = _extract_brackets(full_text)
+            if bracket_text:
+                speak_text = _strip_brackets(full_text)
+                if not text_in_chain:
+                    try:
+                        await self.context.send_message(
+                            event.unified_msg_origin,
+                            event.chain_result([Comp.Plain(bracket_text)]),
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"[cosyvoice] 括号内容单独发送失败: {e}")
+
         logger.info(
             f"[cosyvoice] 语音转入后台合成 | 音色={voice_name} "
             f"总长度={len(full_text)}字 模式={'合并' if merge else '逐段发送'} "
@@ -623,7 +670,8 @@ class CosyVoicePlugin(Star):
         # 这样「等一会儿」可接受，但绝不阻塞其他事件。
         task = asyncio.ensure_future(
             self._background_speak(
-                event, full_text, voice, send_mode, merge, origin, text_in_chain
+                event, full_text, voice, send_mode, merge, origin, text_in_chain,
+                speak_text=speak_text,
             )
         )
         # 避免「未等待的 Task 异常」警告刷屏
@@ -641,6 +689,7 @@ class CosyVoicePlugin(Star):
     async def _background_speak(
         self, event: AstrMessageEvent, full_text: str,
         voice, send_mode: str, merge: bool, origin: str, text_in_chain: bool = False,
+        speak_text: str | None = None,
     ):
         """后台补发语音：不阻塞 on_decorating_result。
 
@@ -652,13 +701,20 @@ class CosyVoicePlugin(Star):
 
         失败则进入冷却 + 回退文字（见 _enter_cooldown）；冷却期内不再打服务端。
         """
+        # 实际合成的文本（已剥离括号内容）；空则无正文可念（纯括号），跳过合成
+        synth_text = speak_text if speak_text is not None else full_text
+        if not synth_text.strip():
+            logger.info("[cosyvoice] 正文仅含括号内容，跳过语音合成（括号内容已按模式单独发送）")
+            self._mark_server_ok()
+            self._decorated.setdefault(origin, set()).add(full_text)
+            return
         logger.info(
             f"[cosyvoice] 后台合成开始 | send_mode={send_mode} merge={merge} "
             f"text_in_chain={text_in_chain} 文本长度={len(full_text)}字"
         )
         try:
             if merge:
-                path = await self.engine.synthesize(full_text, voice)
+                path = await self.engine.synthesize(synth_text, voice)
                 if not path:
                     logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
                     await self._enter_cooldown(
@@ -674,7 +730,7 @@ class CosyVoicePlugin(Star):
                     # 避免「组合消息被平台只展示语音、文字静默丢弃」。
                     success = 0
                     pending: list = []  # 合成失败的段：语音缺段但文字要补发
-                    async for seg_text, wav in self.engine.iter_segment_items(full_text, voice):
+                    async for seg_text, wav in self.engine.iter_segment_items(synth_text, voice):
                         if wav:
                             success += 1
                             audio.schedule_cleanup(wav)
@@ -709,7 +765,7 @@ class CosyVoicePlugin(Star):
                 else:
                     # voice_only：只发语音段，文字由 LLM completion_text 存会话历史兜底
                     sent_any = False
-                    async for wav in self.engine.iter_segment_wavs(full_text, voice):
+                    async for wav in self.engine.iter_segment_wavs(synth_text, voice):
                         sent_any = True
                         rec = Comp.Record(file=wav, url=wav)
                         audio.schedule_cleanup(wav)
@@ -806,6 +862,12 @@ class CosyVoicePlugin(Star):
 
     async def _tts_cmd_impl(self, event: AstrMessageEvent, text: str, mode: str, empty_hint: str):
         """指令类合成公共逻辑：只发语音（不随 send_mode 发文字）；失败按失联/繁忙/偶发分别提示。"""
+        # 括号内容不朗读：指令只发语音，故括号内容仅剥离不念（不额外补发文字）
+        if self.config.get("skip_bracket_tts", True):
+            text = _strip_brackets(text)
+            if not text.strip():
+                yield event.plain_result("括号里的内容我就不念啦～")
+                return
         # 服务端熔断冷却期内，直接提示，不再去打已坏的服务端
         if self._server_cooldown_until and time.time() < self._server_cooldown_until:
             yield event.plain_result(SERVER_DOWN_TIP)

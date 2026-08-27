@@ -120,6 +120,13 @@
             "description": "是否从音色列表中隐藏",
             "hint": "勾选后该音色不出现在 /tts_voice 列出的音色与 LLM 的 list_voices 中；知道名字仍可手动 /tts_voice 名字 使用",
             "default": false
+          },
+          "language": {
+            "type": "string",
+            "title": "语种",
+            "description": "音色所属语种（多语言分类）",
+            "hint": "如 zh（中文）/ en（英文）/ ja（日文）/ ko（韩文）/ ru（俄文）/ th（泰文）等。留空表示未分类。WebUI 会按语种分组展示。",
+            "default": ""
           }
         }
       }
@@ -133,6 +140,13 @@
     "options": ["both", "voice_only"],
     "hint": "both=文本+语音都发（推荐，保证聊天记录文字不丢）；voice_only=只发语音（文字仍写入会话上下文）",
     "default": "both"
+  },
+  "skip_bracket_tts": {
+    "type": "bool",
+    "title": "括号内容不朗读",
+    "description": "开启后，正文中被括号包裹的文字不进入语音合成",
+    "hint": "支持 中文（）/ 英文() / 方括号[]。both 合并模式：括号内容随文字显示在聊天记录，仅语音不念；voice_only 或不合并 both：括号内容单独作为一条文字消息发给用户。/tts 指令同样剥离括号（不补发文字）。",
+    "default": true
   },
   "auto_tts": {
     "type": "bool",
