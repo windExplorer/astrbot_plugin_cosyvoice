@@ -13,7 +13,7 @@
         />
       </div>
       <div class="cv-muted" style="margin: 8px 0 0">
-        合成前自动把「非目标语种」的文本翻成目标语种（默认汉语）。语种判定走本地字符检测，零额外消耗；仅在文本确属需翻译语种时才调用翻译 API。
+        合成前按需翻译：目标语种取所选音色的语种（voices 配置的 language 字段），即「中文文本 + 外语音色 → 翻成该音色语种」。音色未配置语种时回落到下方全局目标语种（默认汉语）。语种判定走本地字符检测，零额外消耗；仅当文本语种与目标语种不一致时才调用翻译 API。
       </div>
 
       <el-divider />
@@ -23,7 +23,7 @@
           <el-select v-model="config.target" filterable allow-create default-first-option style="width: 220px">
             <el-option v-for="l in LANG_OPTIONS" :key="l" :label="l" :value="l" />
           </el-select>
-          <span class="cv-muted" style="margin-left: 10px">翻译成什么语言</span>
+          <span class="cv-muted" style="margin-left: 10px">全局回落目标语种：仅当所选音色未配置语种时生效；合成优先用音色的 language（按音色翻译）</span>
         </el-form-item>
         <el-form-item label="需翻译语种">
           <el-select
@@ -146,6 +146,7 @@
         show-icon
         style="margin-top: 12px"
       />
+      <div class="cv-muted" style="margin-top: 12px">测试按全局目标语种验证接口与语种映射；实际合成时目标语种取所选音色的 language（按音色翻译）。</div>
       <el-descriptions
         v-if="testResult"
         :column="1"
