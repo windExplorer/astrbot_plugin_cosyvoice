@@ -583,13 +583,13 @@ class CosyVoicePlugin(Star):
     # ---------- 括号内容不朗读（模块级工具） ----------
     _BRACKET_RE = re.compile(r"[（(\[](.*?)[）)\]]", re.DOTALL)
 
-    def _strip_brackets(text: str) -> str:
+    def _strip_brackets(self, text: str) -> str:
         """移除所有被括号包裹的内容（含括号本身），用于不进入语音合成。"""
-        return _BRACKET_RE.sub("", text)
+        return self._BRACKET_RE.sub("", text)
 
-    def _extract_brackets(text: str) -> str:
+    def _extract_brackets(self, text: str) -> str:
         """提取所有括号内容，按出现顺序拼接成可单独发送的文字（换行分隔）。"""
-        parts = [p.strip() for p in _BRACKET_RE.findall(text) if p and p.strip()]
+        parts = [p.strip() for p in self._BRACKET_RE.findall(text) if p and p.strip()]
         return "\n".join(parts)
 
     # ---------- 装饰结果钩子：不阻塞管线，文字立刻发，语音后台补 ----------
@@ -670,7 +670,7 @@ class CosyVoicePlugin(Star):
         if cfg.get("skip_bracket_tts", True):
             bracket_text = self._extract_brackets(full_text)
             if bracket_text:
-                speak_text = _strip_brackets(full_text)
+                speak_text = self._strip_brackets(full_text)
                 if not text_in_chain:
                     try:
                         await self.context.send_message(
@@ -886,7 +886,7 @@ class CosyVoicePlugin(Star):
         """指令类合成公共逻辑：只发语音（不随 send_mode 发文字）；失败按失联/繁忙/偶发分别提示。"""
         # 括号内容不朗读：指令只发语音，故括号内容仅剥离不念（不额外补发文字）
         if self.config.get("skip_bracket_tts", True):
-            text = _strip_brackets(text)
+            text = self._strip_brackets(text)
             if not text.strip():
                 yield event.plain_result("括号里的内容我就不念啦～")
                 return

@@ -2,6 +2,14 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.0.7 (2026-08-28)
+
+- 修复 v2.0.6 引入的 `NameError: name '_BRACKET_RE' is not defined`：`_BRACKET_RE` 是类属性，但 `_strip_brackets`/`_extract_brackets` 方法体内裸引用（Python 名字查找不会进类命名空间），`skip_bracket_tts` 开启且回复含括号时仍在结果装饰阶段报错、消息发不出。本次改为 `self._BRACKET_RE` 引用，括号剥离与单独补发文字恢复正常。
+
+## v2.0.6 (2026-08-28)
+
+- 修复 v2.0.5 修复不彻底导致的运行时报错：`on_decorating_result` 中 `self._extract_brackets(...)` 仍抛 `TypeError: _extract_brackets() takes 1 positional argument but 2 were given`（`skip_bracket_tts` 开启且回复含括号内容时，LLM 回复在结果装饰阶段崩掉、消息发不出）。根因是 `_extract_brackets`/`_strip_brackets` 方法定义漏了 `self` 参数：本次统一修正为实例方法（定义补 `self`，类内调用补 `self.`），括号内容单独补发文字恢复正常。
+
 ## v2.0.5 (2026-08-28)
 
 - 修复运行时崩溃 `NameError: name '_extract_brackets' is not defined`：`on_decorating_result` 在 `skip_bracket_tts` 开启时会把括号内容单独发送为文字，但误将实例方法当作全局函数调用，导致 LLM 回复在「结果装饰/发送」阶段整段抛异常、消息发不出来。改为 `self._extract_brackets(...)` 调用修复。
