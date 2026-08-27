@@ -50,6 +50,8 @@ def register_web_apis(plugin) -> None:
     ctx.register_web_api(f"/{p}/voices/hidden", _set_voice_hidden(plugin), ["POST"], "隐藏/显示音色")
     ctx.register_web_api(f"/{p}/sessions", _list_sessions(plugin), ["GET"], "会话语音状态列表")
     ctx.register_web_api(f"/{p}/sessions/set", _set_session(plugin), ["POST"], "按会话设置语音开关/音色/发送方式")
+    ctx.register_web_api(f"/{p}/sessions/delete", _delete_session(plugin), ["POST"], "删除会话语音状态")
+    ctx.register_web_api(f"/{p}/sessions/clear", _clear_sessions(plugin), ["POST"], "清空全部会话语音状态")
     ctx.register_web_api(f"/{p}/sessions/batch_off", _batch_off(plugin), ["POST"], "批量关闭会话语音")
     ctx.register_web_api(f"/{p}/synthesize", _synthesize(plugin), ["GET", "POST"], "合成试听（返回 wav 下载）")
     ctx.register_web_api(f"/{p}/translate", _translate_config(plugin), ["GET", "POST"], "翻译配置（读取/保存）")
@@ -338,6 +340,16 @@ def _set_voice_hidden(plugin):
     return handler
 
 
+def _fmt_origin(origin: str) -> str:
+    """把 unified_msg_origin 解析成易读标签（best-effort）。"""
+    parts = str(origin).split(":")
+    if len(parts) >= 3:
+        return f"{parts[0]} · 群 {parts[1]} · 用户 {parts[2]}"
+    if len(parts) == 2:
+        return f"{parts[0]} · {parts[1]}"
+    return str(origin)
+
+
 # ---------- 会话列表 ----------
 def _list_sessions(plugin):
     async def handler():
@@ -346,14 +358,18 @@ def _list_sessions(plugin):
         keys = set(plugin._sessions) | set(plugin._voices) | set(plugin._sendmodes)
         sessions = []
         for origin in sorted(keys):
-            prob = plugin._sessions.get(origin)
-            on = prob is not None and prob is not False
+            raw = plugin._sessions.get(origin)
+            on = raw is not None and raw is not False
+            sm = plugin._sendmodes.get(origin)
+            mode = {"both": "语音+文字", "voice_only": "仅语音"}.get(sm, "默认(跟随全局)")
+            prob = raw if isinstance(raw, (int, float)) else (1.0 if on else None)
             sessions.append({
-                "origin": origin,
+                "id": origin,
+                "user": _fmt_origin(origin),
                 "on": on,
-                "prob": prob if isinstance(prob, (int, float)) else (1.0 if on else None),
-                "voice": plugin._voices.get(origin, ""),
-                "send_mode": plugin._sendmodes.get(origin) if plugin._sendmodes.get(origin) in ("both", "voice_only") else None,
+                "mode": mode,
+                "voice": plugin._voices.get(origin, "") or "默认",
+                "prob": prob,
             })
         return json_response({"sessions": sessions})
 
@@ -416,6 +432,38 @@ def _batch_off(plugin):
             plugin._sessions.pop(str(origin), None)
         plugin._save_sessions()
         return json_response({"ok": True, "closed": len(origins)})
+
+    return handler
+
+
+# ---------- 删除单个会话语音状态 ----------
+def _delete_session(plugin):
+    async def handler():
+        payload = await request.json(default={})
+        origin = str(payload.get("id") or payload.get("origin") or "").strip()
+        if not origin:
+            return error_response("缺少 id", status_code=400)
+        plugin._sessions.pop(origin, None)
+        plugin._voices.pop(origin, None)
+        plugin._sendmodes.pop(origin, None)
+        plugin._save_sessions()
+        plugin._save_voices()
+        plugin._save_sendmodes()
+        return json_response({"ok": True})
+
+    return handler
+
+
+# ---------- 清空全部会话语音状态 ----------
+def _clear_sessions(plugin):
+    async def handler():
+        plugin._sessions.clear()
+        plugin._voices.clear()
+        plugin._sendmodes.clear()
+        plugin._save_sessions()
+        plugin._save_voices()
+        plugin._save_sendmodes()
+        return json_response({"ok": True})
 
     return handler
 

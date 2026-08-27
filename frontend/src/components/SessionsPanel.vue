@@ -12,21 +12,19 @@
       </div>
       <el-table :data="sessions" v-loading="loading" stripe style="width: 100%">
         <el-table-column prop="id" label="会话 ID" min-width="170" show-overflow-tooltip />
-        <el-table-column prop="user" label="用户" min-width="120" />
-        <el-table-column label="模式" min-width="90">
+        <el-table-column prop="user" label="用户" min-width="160" show-overflow-tooltip />
+        <el-table-column prop="mode" label="发送方式" min-width="110" />
+        <el-table-column label="语音开关" min-width="90">
           <template #default="{ row }">
-            <el-tag size="small" effect="light">{{ row.mode }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" min-width="90">
-          <template #default="{ row }">
-            <el-tag :type="row.timer_armed ? 'success' : 'info'" size="small" effect="light">
-              {{ row.timer_armed ? '待合成' : '空闲' }}
+            <el-tag :type="row.on ? 'success' : 'info'" size="small" effect="light">
+              {{ row.on ? '已开启' : '未开启' }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="chars" label="累计字数" min-width="90" />
-        <el-table-column prop="updated" label="更新时间" min-width="150" />
+        <el-table-column prop="voice" label="音色" min-width="120" show-overflow-tooltip />
+        <el-table-column label="概率" min-width="80">
+          <template #default="{ row }">{{ row.prob == null ? '—' : row.prob }}</template>
+        </el-table-column>
         <el-table-column label="操作" min-width="110" fixed="right">
           <template #default="{ row }">
             <el-button size="small" :icon="Delete" type="danger" plain @click="remove(row)">删除</el-button>
