@@ -65,6 +65,9 @@ class CosyVoicePlugin(Star):
             queue_max_position=int(self.config.get("tts_queue_max_position", 8) or 0),
         )
         self._cooldown_sec = float(self.config.get("tts_cooldown_sec", 30))
+        # 翻译适配器（须在 engine 之前创建，engine 持有其引用做合成前翻译）
+        self._translate_file = os.path.join(self._data_dir(), "translate_config.json")
+        self.translator = Translator(self._load_translate_cfg())
         self.engine = TtsEngine(
             self.config, self.client,
             translator=self.translator,
@@ -104,9 +107,6 @@ class CosyVoicePlugin(Star):
         # 让 WebUI 能独立管理音色，不被 _refresh_cfg 用配置覆盖。
         self._voices_lib_file = os.path.join(data_dir, "tts_voices_lib.json")
         self._voices_lib = self._load_voices_lib()
-        # 翻译配置（自有 data/ 持久，与 AstrBot 主配置解耦）：enable/target/source/api…
-        self._translate_file = os.path.join(data_dir, "translate_config.json")
-        self.translator = Translator(self._load_translate_cfg())
 
     def _data_dir(self) -> str:
         """持久数据目录。

@@ -28,6 +28,8 @@ async function init() {
   }
   const app = createApp(App)
   app.provide('bridgeCtx', ctx)
+  // 供各面板 inject('bridge') 使用（api.js 默认导出的 bridge 适配层）
+  app.provide('bridge', bridge)
   app.provide('locale', computed(() => localeMap[ctx.value.locale] || zhCn))
   // 全局轻提示（成功/失败反馈）
   app.provide('notify', {

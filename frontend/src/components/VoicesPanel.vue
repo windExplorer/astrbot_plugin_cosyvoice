@@ -19,13 +19,13 @@
         <el-option v-for="l in langOptions" :key="l" :label="langLabel(l)" :value="l" />
       </el-select>
       <el-badge :value="stats.total" type="info" :show-zero="false">
-        <el-button plain>音色总数</el-button>
+        <el-button :type="visibleFilter === 'all' ? 'primary' : 'plain'" @click="visibleFilter = 'all'">音色总数</el-button>
       </el-badge>
       <el-badge :value="stats.visible" type="success" :show-zero="false">
-        <el-button plain>可见</el-button>
+        <el-button :type="visibleFilter === 'visible' ? 'primary' : 'plain'" @click="visibleFilter = 'visible'">可见</el-button>
       </el-badge>
       <el-badge :value="stats.hidden" type="warning" :show-zero="false">
-        <el-button plain>已隐藏</el-button>
+        <el-button :type="visibleFilter === 'hidden' ? 'primary' : 'plain'" @click="visibleFilter = 'hidden'">已隐藏</el-button>
       </el-badge>
       <div class="cv-spacer" />
       <el-button type="primary" :icon="Plus" @click="openCreate">添加音色</el-button>
@@ -46,6 +46,7 @@
         style="margin: 10px 0"
       />
       <div class="cv-audition-bar">
+        <el-button type="primary" :icon="VideoPlay" :disabled="!auditionText.trim()" @click="auditionDefault">试听（默认音色）</el-button>
         <audio ref="audioRef" :src="audioSrc" controls class="cv-audio" @ended="onEnded" @play="onPlay" />
         <span v-if="playing" class="cv-muted">正在试听：{{ playing }}</span>
       </div>
@@ -98,6 +99,7 @@
             </div>
             <div class="cv-voice-actions">
               <el-button size="small" :icon="VideoPlay" @click="audition(v)">试听</el-button>
+              <el-button size="small" :icon="Star" @click="setDefault(v)" :disabled="v.is_default">设为默认</el-button>
               <el-button size="small" :icon="Edit" @click="openEdit(v)">编辑</el-button>
               <el-button size="small" type="danger" plain :icon="Delete" @click="remove(v)" />
             </div>
@@ -127,7 +129,7 @@
             placeholder="选择或输入语种代码"
             style="width: 100%"
           >
-            <el-option v-for="l in LANG_OPTIONS" :key="l" :label="l" :value="l" />
+            <el-option v-for="l in LANG_OPTIONS" :key="l" :label="langLabel(l)" :value="l" />
           </el-select>
         </el-form-item>
         <el-form-item label="参考音频">
@@ -163,7 +165,7 @@
 import { ref, reactive, computed, inject, nextTick, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Search, Plus, Edit, Delete, VideoPlay, StarFilled, Headset,
+  Search, Plus, Edit, Delete, VideoPlay, StarFilled, Star, Headset,
 } from '@element-plus/icons-vue'
 
 const bridge = inject('bridge')
@@ -178,6 +180,7 @@ const voices = ref([])
 const loading = ref(false)
 const search = ref('')
 const filterLang = ref('__all')
+const visibleFilter = ref('all')
 const selected = ref([])
 
 const audioRef = ref(null)
@@ -205,8 +208,10 @@ const stats = computed(() => {
 const filteredVoices = computed(() => {
   let list = voices.value
   if (filterLang.value && filterLang.value !== '__all') {
-    list = list.filter((v) => (v.language || '未分类') === filterLang.value)
+    list = list.filter((v) => v.language === filterLang.value)
   }
+  if (visibleFilter.value === 'visible') list = list.filter((v) => !v.hidden)
+  else if (visibleFilter.value === 'hidden') list = list.filter((v) => v.hidden)
   const q = search.value.trim().toLowerCase()
   if (q) {
     list = list.filter(
@@ -220,7 +225,7 @@ const filteredVoices = computed(() => {
 const grouped = computed(() => {
   const m = {}
   for (const v of filteredVoices.value) {
-    const lang = v.language || '未分类'
+    const lang = v.language || 'zh'
     ;(m[lang] = m[lang] || []).push(v)
   }
   const keys = Object.keys(m).sort((a, b) => {
@@ -244,7 +249,7 @@ async function load() {
       name: v.name,
       prompt_wav: v.prompt_wav || '',
       prompt_text: v.prompt_text || '',
-      language: v.language || '',
+      language: v.language || 'zh',
       hidden: !!v.hidden,
       is_default: !!v.is_default,
     }))
@@ -255,14 +260,20 @@ async function load() {
   }
 }
 
-async function audition(v) {
+async function playVoice(vname) {
   if (!auditionText.value.trim()) {
     ElMessage.warning('请先填写试听文本')
     return
   }
-  playing.value = v.name
+  playing.value = vname || '默认音色'
   try {
-    const url = await bridge.download('synthesize', { voice: v.name, text: auditionText.value })
+    const params = vname ? { voice: vname, text: auditionText.value } : { text: auditionText.value }
+    const res = await bridge.download('synthesize', params)
+    // 兼容 bridge 返回字符串 URL 或 { blob, filename } 两种形态
+    let url = ''
+    if (typeof res === 'string') url = res
+    else if (res && res.blob) url = URL.createObjectURL(res.blob)
+    if (!url) throw new Error('未获取到音频')
     audioSrc.value = url
     await nextTick()
     if (audioRef.value) await audioRef.value.play()
@@ -271,8 +282,20 @@ async function audition(v) {
     playing.value = ''
   }
 }
+async function audition(v) { await playVoice(v.name) }
+async function auditionDefault() { await playVoice('') }
 function onEnded() { playing.value = '' }
 function onPlay() { /* noop */ }
+
+async function setDefault(v) {
+  try {
+    await bridge.apiPost('voices/default', { name: v.name })
+    ElMessage.success(`已将「${v.name}」设为默认音色`)
+    await load()
+  } catch (e) {
+    ElMessage.error('设置默认失败：' + e)
+  }
+}
 
 function openCreate() {
   isEdit.value = false
