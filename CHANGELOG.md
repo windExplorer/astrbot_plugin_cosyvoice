@@ -2,6 +2,10 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.1.7 (2026-08-28)
+
+- feat: 新增「先发语音再发文字」配置项 `text_after_voice`（bool，默认 true）。不合并 both（逐段发送）模式下，每段先发语音、再发对应文字（先听后读）；设为 false 恢复先文字后语音（原行为）。生效于翻译多段与未走翻译多段两个分支；合并 both / voice_only 不受影响。
+
 ## v2.1.6 (2026-08-28)
 
 - feat: WebUI 会话列表显示 QQ号/群号+昵称，并支持编辑配置。后端在 on_decorating_result 中 best-effort 记录会话昵称（事件 sender_name，持久化 data/tts_nicknames.json）；_list_sessions 新增 platform/group_id/user_id/label/nickname 字段（由 unified_msg_origin 解析群号与 QQ号）。前端会话列优先显示昵称、副行显示群号/QQ号；新增「编辑」弹窗，可配置语音开关、发送方式（默认/both/voice_only）、音色（下拉取自 voices 接口）。修复此前仅「删除」按钮、无法配置的问题。

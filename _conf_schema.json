@@ -141,6 +141,13 @@
     "hint": "both=文本+语音都发（推荐，保证聊天记录文字不丢）；voice_only=只发语音（文字仍写入会话上下文）",
     "default": "both"
   },
+  "text_after_voice": {
+    "type": "bool",
+    "title": "先发语音再发文字",
+    "description": "不合并 both 模式下，逐段发送时语音与文字的先后顺序",
+    "hint": "true=每段先发语音、再发对应文字（先听后读）；false=先发文字、再发语音（原行为）。仅影响不合并 both（逐段发送）模式；合并 both 文字在结果链一次性发、voice_only 只发语音，这两种不受此控制。",
+    "default": true
+  },
   "skip_bracket_tts": {
     "type": "bool",
     "title": "括号内容不朗读",
