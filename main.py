@@ -684,12 +684,17 @@ class CosyVoicePlugin(Star):
                             logger.warning(f"[cosyvoice] 分段翻译异常，回退该段原文: {e}")
                             t = seg
                         pairs.append((seg, t))
-                    audio_text = "\n".join(t for _, t in pairs)
-                    if tmode == "translated":
-                        display_text = audio_text
-                    else:  # both：译文直接换行接「原文：xxx」（不加空行）
-                        display_text = "\n".join(f"{t}\n原文：{o}" for o, t in pairs)
-                    seg_items = pairs
+                    # 仅当「确有段被翻译」才走译文排版；否则视为不需要翻译，
+                    # 保持纯原文展示（不加「原文：」前缀，也不切译文语音）。
+                    if any(t != o for o, t in pairs):
+                        audio_text = "\n".join(t for _, t in pairs)
+                        if tmode == "translated":
+                            display_text = audio_text
+                        else:  # both：仅真正翻译的段才接「原文：xxx」
+                            display_text = "\n".join(
+                                (f"{t}\n原文：{o}" if t != o else o) for o, t in pairs
+                            )
+                        seg_items = pairs
                 else:
                     # 单行无多段：整块翻译（保持原行为，避免无谓的逐段调用）
                     try:
@@ -801,7 +806,7 @@ class CosyVoicePlugin(Star):
                     tmode = (self.config.get("translate_display_mode") or "both").strip().lower()
                     sent_any = False
                     for orig, trans in seg_items:
-                        disp = trans if tmode == "translated" else f"{trans}\n原文：{orig}"
+                        disp = trans if tmode == "translated" else (f"{trans}\n原文：{orig}" if trans != orig else orig)
                         if not await self._realtime_send(event, [Comp.Plain(disp)]):
                             logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
                         wav = await self.engine.synthesize(trans, voice, pre_translated=True)
