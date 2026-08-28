@@ -2,6 +2,19 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.1.19 (2026-08-28)
+
+- fix: 语音/文字发送报 `module 'astrbot.api.message_components' has no attribute 'MessageChain'`。
+  - 根因：`MessageChain` 并不在 `astrbot.api.message_components` 中（该模块仅重导出组件类），此前打包进生产的用法在运行时取不到。
+  - 改为兼容性导入：依次尝试 `astrbot.api.all` → `astrbot.core.message.message_event_result` → `message_components`，取到可用的 `MessageChain` 再构造消息链，语音与文字均可正常推送。
+- 版本 v2.1.18 → v2.1.19。
+
+## v2.1.18 (2026-08-28)
+
+- fix: WebUI 试听失败不再只显示误导性的「无有效音频（可能是纯符号/无音色）」兜底文案，改为透传真实失败原因（`TtsEngine.last_failure`），根因一眼可见。
+- fix: 「无有效可合成文本」日志从 DEBUG 提升为 WARNING 并附上原始文本与音色/语种，默认日志级别即可看到，方便排查试听与聊天语音失败。
+- 版本 v2.1.17 → v2.1.18。
+
 ## v2.1.17 (2026-08-28)
 
 - fix: 修复 LLM 工具 `text_to_speech` 合成成功但用户收不到语音的问题（翻译与合成本身正常，日志可见「合成 1/1 OK」）。

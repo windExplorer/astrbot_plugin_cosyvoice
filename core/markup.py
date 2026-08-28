@@ -27,8 +27,8 @@ MARKUP_WHITELIST_RE = re.compile(
 
 # ---------- 规则 1：标点换气 ----------
 _PUNCT_BREATH = {
-    "zh": ("。！？!?", "[breath]"),
-    "ja": ("。！？!?", "[breath]"),
+    "zh": ("。！？!?…", "[breath]"),
+    "ja": ("。！？!?…", "[breath]"),
     "en": (".!?", "[breath]"),
 }
 _PUNCT_QUICK = {
@@ -36,6 +36,8 @@ _PUNCT_QUICK = {
     "ja": ("、，；：,;:", "[quick_breath]"),
     "en": (",;:", "[quick_breath]"),
 }
+# 波浪号（拖音/短停顿）：半角 ~ 与全角 ～。合成时无条件插入短换气，制造自然的拖音停顿。
+_PAUSE_CHARS = "~～"
 # 英文句末点排除缩写 / 小数
 _EN_ABBREV_RE = re.compile(
     r"\b(?:Mr|Mrs|Ms|Dr|Prof|St|vs|etc|Inc|Jr|Sr|No|Co|Corp)\.$", re.IGNORECASE
@@ -63,6 +65,7 @@ def _insert_breath_in_plain(seg: str, lang: str) -> str:
     quick_punct, quick_tok = _PUNCT_QUICK.get(lang, _PUNCT_QUICK["zh"])
     end_set = set(end_punct)
     quick_set = set(quick_punct)
+    pause_set = set(_PAUSE_CHARS)
     out = []
     last = -100
     i = 0
@@ -75,7 +78,11 @@ def _insert_breath_in_plain(seg: str, lang: str) -> str:
             i += 1
             continue
         nxt = seg[i + 1] if i + 1 < n else ""
-        if ch in end_set and nxt not in end_set and nxt not in quick_set:
+        if ch in pause_set:
+            # 波浪号 → 短停顿（拖音），无条件插入，不依赖间隔
+            out.append(quick_tok)
+            last = len(out)
+        elif ch in end_set and nxt not in end_set and nxt not in quick_set:
             if lang == "en" and ch == ".":
                 ctx = seg[max(0, i - 14): i + 1]
                 if _EN_ABBREV_RE.search(ctx) or _EN_NUM_RE.search(ctx):

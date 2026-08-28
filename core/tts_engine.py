@@ -30,6 +30,18 @@ _MEDIA_KEY_TAG_RE = re.compile(r"<[^<>]*(?:media|image|img|record)[^<>]*>", re.I
 # 如 comfyui_draw{"name":"comfyui_draw","args":{...}}。在 tool_loop 最终响应的
 # completion_text 里会混入这类内容，必须完整剔除（否则被当正文朗读/显示）。
 _LLM_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+# agent runner 的系统调用标记，如 <system_call>{...}</system_call>（LLM 工具调用泄漏）。
+# 若未被框架正确消费会以纯文本混入正文，必须在合成/显示前剔除。
+# 兼容多种泄漏形态：成对闭合、自闭合、孤立开标签（无内容/内容未闭合）、孤立收尾标签。
+_SYSTEM_CALL_RE = re.compile(
+    r"<system_call\b[^>]*>.*?</system_call>"  # 成对闭合
+    r"|<system_call\b[^>]*/?>"                 # 自闭合或孤立开标签
+    r"|</system_call\s*>",                     # 孤立收尾标签
+    re.I | re.S,
+)
+# LLM 推理/元标记泄漏：<think>...</think> 及其自闭合/缺失闭合变体、</think> 残留等。
+# 这类标记若未被框架剥除，会以纯文本混入最终回复，应在合成/显示前剔除。
+_THINK_TAG_RE = re.compile(r"<think\b[^>]*>.*?</think>|<think\b[^>]*/?>|</think\s*>", re.I | re.S)
 
 
 def _looks_like_tool_call(text: str, start: int) -> int:
@@ -93,8 +105,10 @@ def clean_media_placeholders(text: str) -> str:
 
 
 def clean_tts_text(text: str) -> str:
-    """回复文本综合净化：剔除媒体占位符标签 + LLM 工具调用序列化。"""
-    return clean_tool_calls(clean_media_placeholders(text))
+    """回复文本综合净化：剔除媒体占位符标签 + LLM 工具调用序列化 + 系统调用/思考标记。"""
+    if not text:
+        return text
+    return clean_tool_calls(clean_media_placeholders(_THINK_TAG_RE.sub("", _SYSTEM_CALL_RE.sub("", text))))
 
 
 def is_speakable(text: str) -> bool:
@@ -126,6 +140,8 @@ class TtsEngine:
         # 翻译适配器（可选）：在合成前把非目标语种的文本翻成目标语言（默认汉语）。
         self.translator = translator
         self.voices: dict = {}
+        # 最近一次合成失败的原因（供 WebUI 试听接口透传，避免只显示「无有效音频」兜底文案）
+        self.last_failure = ""
         # 全局合成并发信号量：限制同时打到 TTS 服务端的请求数。
         # 弱服务端（GPU 推理）扛不住多并发，多用户同时触发时不限制会把服务端打爆
         # （连接排队 + 读超时雪崩）。默认 1 = 完全串行，最稳；可调大若服务端够强。
@@ -509,8 +525,10 @@ class TtsEngine:
 
     async def synthesize(self, text: str, voice_name: str | None = None, *, pre_translated: bool = False) -> str | None:
         """合成文本并返回 wav 文件路径；无可用音色或失败返回 None。"""
+        self.last_failure = ""
         name, prompt_wav, prompt_text = self.resolve_voice(voice_name)
         if name is None:
+            self.last_failure = "未配置任何可用音色（请在插件配置/WebUI 里选一个可用音色）"
             logger.warning(
                 f"[cosyvoice] 未配置任何可用音色，跳过语音合成。"
                 f"运行实例读到的 raw voices={repr(self.config.get('voices'))[:300]}"
@@ -523,7 +541,12 @@ class TtsEngine:
 
         chunks = [c for c in self.split_text(text) if is_speakable(c)]
         if not chunks:
-            logger.debug("[cosyvoice] 无有效可合成文本，跳过语音合成")
+            self.last_failure = f"无有效可合成文本（被过滤为空白/纯符号）：{text!r}"
+            # 提升到 WARNING：否则默认日志级别下这行被吞，WebUI 只会显示「无有效音频/纯符号」兜底文案，难以定位真因
+            logger.warning(
+                f"[cosyvoice] 无有效可合成文本，跳过语音合成。"
+                f"原始文本={text!r} | voice={name!r} language={vlang!r}"
+            )
             return None
 
         try:
@@ -546,6 +569,7 @@ class TtsEngine:
                     logger.info(f"[cosyvoice] 合成 {i}/{total} OK | {dt:.0f}ms {len(pcm)}字节PCM")
                     pcms.append(pcm)
             if not pcms:
+                self.last_failure = "所有分段合成均返回空音频（很可能音色参考音频 prompt_wav 路径不对或文件缺失，服务端拒绝零样本合成）"
                 logger.warning("[cosyvoice] 合并合成完成：0 段成功，无有效音频")
                 return None
             combined = b"".join(pcms)
@@ -559,6 +583,7 @@ class TtsEngine:
             # 由插件层给出「繁忙稍后再试」的专门提示，而不是按普通失败吞掉
             raise
         except Exception as e:  # noqa: BLE001
+            self.last_failure = f"语音合成异常：{e}"
             logger.error(f"[cosyvoice] 语音合成失败: {e}")
             return None
 

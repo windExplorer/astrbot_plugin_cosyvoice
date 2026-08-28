@@ -531,7 +531,8 @@ def _synthesize(plugin):
             logger.warning(f"[cosyvoice] WebUI 试听合成失败: {e}")
             return error_response(f"试听合成失败：{e}", status_code=500)
         if not wav_path:
-            return error_response("试听合成失败（无有效音频，可能是纯符号/无音色）", status_code=500)
+            reason = getattr(plugin.engine, "last_failure", "") or "未知原因（详见插件运行日志）"
+            return error_response(f"试听合成失败（无有效音频）：{reason}", status_code=500)
 
         # 复制到插件数据目录 data/previews/ 留存（固定文件名：<音色名>.wav）
         previews_dir = _os.path.join(plugin._data_dir(), "previews")

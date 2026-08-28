@@ -169,6 +169,7 @@ POST /inference_zero_shot
 ### 规则 1：标点驱动换气（最基础，建议默认开启）
 - 句末标点 `。！？…` 后插入 `[breath]`
 - 句中标点 `，、；：` 后插入 `[quick_breath]`
+- 波浪号 `~/～`（拖音/短停顿）后插入 `[quick_breath]`，无条件、不依赖间隔
 - 连续标点（如 `……`）只插一次，避免堆叠
 
 **评价：✅ 好，风险低。** 给语音加自然呼吸节奏，几乎所有文本受益。
@@ -274,7 +275,7 @@ CosyVoice3 要求日文必须转成**片假名**才能正常合成（`example.py
 
 | 配置项 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `auto_breath` | bool | `true` | 标点换气：句末插 `[breath]`、句中插 `[quick_breath]`。低风险，默认开。 |
+| `auto_breath` | bool | `true` | 标点换气：句末 `。！？…` 插 `[breath]`、句中 `，、；：` 插 `[quick_breath]`、波浪号 `~/～` 后插 `[quick_breath]`（拖音短停顿）。低风险，默认开。 |
 | `auto_effect` | bool | `false` | 关键词音效：按语种词典在句末追加 `[laughter]`/`[sigh]`/`[cough]`。易翻车，默认关。 |
 | `effect_intensity` | string | `medium` | 音效密度：`light`（每句≤1）/ `medium`（≤3）/ `strong`（≤5）。仅 `auto_effect=true` 生效。 |
 

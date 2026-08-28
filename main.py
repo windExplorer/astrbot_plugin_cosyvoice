@@ -19,6 +19,14 @@ import random
 import asyncio
 
 import astrbot.api.message_components as Comp
+# MessageChain 不在 message_components 模块中（各 AstrBot 版本位置不同），做兼容性导入
+try:
+    from astrbot.api.all import MessageChain
+except ImportError:  # noqa: BLE001
+    try:
+        from astrbot.core.message.message_event_result import MessageChain
+    except ImportError:  # noqa: BLE001
+        from astrbot.api.message_components import MessageChain
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
@@ -275,7 +283,7 @@ class CosyVoicePlugin(Star):
             try:
                 # 直接传组件列表：chain_result() 会改写事件自身结果链，主动推送无需也不应改动它
                 await self.context.send_message(
-                    event.unified_msg_origin, [Comp.Plain(tip)]
+                    event.unified_msg_origin, MessageChain([Comp.Plain(tip)])
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[cosyvoice] 失联提示发送失败: {e}")
@@ -573,7 +581,9 @@ class CosyVoicePlugin(Star):
         """
         types = [type(c).__name__ for c in records]
         # 不再调用 event.chain_result()，避免篡改事件结果链（见上方说明 ①）
-        chain = list(records)
+        # 注意：event.send / context.send_message 需要 MessageChain 对象（内部访问 .chain），
+        # 直接传裸 list 会报 "'list' object has no attribute 'chain'"，故统一包成 MessageChain。
+        chain = MessageChain(list(records))
         try:
             send = getattr(event, "send", None)
             if callable(send):
@@ -1118,7 +1128,7 @@ class CosyVoicePlugin(Star):
         try:
             # 直接传组件列表：chain_result() 会改写事件自身结果链，主动推送无需也不应改动它
             await self.context.send_message(
-                event.unified_msg_origin, [Comp.Plain(full_text)]
+                event.unified_msg_origin, MessageChain([Comp.Plain(full_text)])
             )
             logger.info("[cosyvoice] 语音失败，已退化为补发文字")
         except Exception as e:  # noqa: BLE001
@@ -1450,6 +1460,8 @@ class CosyVoicePlugin(Star):
         """将指定文本转换为语音并朗读出来（临时念一次，不开启长期语音模式）。
         仅在用户明确给出要朗读的具体文本（如「把这段话念出来 / 朗读以下内容」）时使用。
         注意：若用户想「长期用语音交流」，请调用 set_voice_mode，不要调本工具。
+        若当前聊天已开启语音模式（/tts_on 或全局 auto_tts），本工具会直接拒绝执行，
+        请改用文字正常回复，由插件自动朗读最终回复。
 
         Args:
             text(string): 需要朗读的文本内容
@@ -1459,6 +1471,13 @@ class CosyVoicePlugin(Star):
         cfg = self.config
         if not self.config.get("enable_llm_tool", True):
             return "语音功能还没开呢，先把它打开我就能念啦～"
+
+        # 已开启「自动语音模式」（本会话 /tts_on 或全局 auto_tts）时，不应再手动调本工具：
+        # 自动语音环节会朗读最终回复，手动调用反而会因 suppress 标志杀掉自动语音、
+        # 且把回复拆成「调工具前 / 调工具后」多条消息。直接拒绝并引导模型用文字回复即可。
+        if bool(cfg.get("auto_tts", False)) or self._session_prob(event) is not None:
+            return ("当前聊天已开启语音模式，无需调用本工具。请直接把要说的写进文字回复，"
+                    "插件会自动把回复合成语音发送。")
 
         # 服务端熔断冷却期内，直接提示，不再去打已坏的服务端
         if self._server_cooldown_until and time.time() < self._server_cooldown_until:
