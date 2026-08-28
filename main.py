@@ -690,9 +690,9 @@ class CosyVoicePlugin(Star):
                         audio_text = "\n".join(t for _, t in pairs)
                         if tmode == "translated":
                             display_text = audio_text
-                        else:  # both：仅真正翻译的段才接「原文：xxx」
+                        else:  # both：仅真正翻译的段才接「中文：xxx」
                             display_text = "\n".join(
-                                (f"{t}\n原文：{o}" if t != o else o) for o, t in pairs
+                                (f"{t}\n中文：{o}" if t != o else o) for o, t in pairs
                             )
                         seg_items = pairs
                 else:
@@ -704,7 +704,7 @@ class CosyVoicePlugin(Star):
                         translated = full_text
                     if translated and translated != full_text:
                         audio_text = translated
-                        display_text = translated if tmode == "translated" else f"{translated}\n原文：{full_text}"
+                        display_text = translated if tmode == "translated" else f"{translated}\n中文：{full_text}"
 
         if not text_in_chain:
             result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
@@ -715,21 +715,14 @@ class CosyVoicePlugin(Star):
                 if isinstance(c, Comp.Plain):
                     c.text = display_text
 
-        # 括号内容不朗读：从合成文本剥离括号内容；若当前文字不在结果链
-        # （voice_only / 不合并 both），用户看不到括号内容，单独补发一条文字。
+        # 括号内容不朗读：仅从「语音合成文本」剥离括号内容，文字照常显示（含括号），不单独补发。
+        # 聊天气泡里仍是完整原文（带括号），但语音不会把括号内容念出来——既满足「括号不朗读」，
+        # 又避免单独补发括号文字导致与完整消息重复出现。
         speak_text = full_text
         if cfg.get("skip_bracket_tts", True):
             bracket_text = self._extract_brackets(full_text)
             if bracket_text:
                 speak_text = self._strip_brackets(full_text)
-                if not text_in_chain:
-                    try:
-                        await self.context.send_message(
-                            event.unified_msg_origin,
-                            event.chain_result([Comp.Plain(bracket_text)]),
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(f"[cosyvoice] 括号内容单独发送失败: {e}")
         # 未翻译时合成文本按括号剥离规则取原文；翻译命中时 audio_text 已是译文
         if audio_text is None:
             audio_text = speak_text
@@ -806,7 +799,7 @@ class CosyVoicePlugin(Star):
                     tmode = (self.config.get("translate_display_mode") or "both").strip().lower()
                     sent_any = False
                     for orig, trans in seg_items:
-                        disp = trans if tmode == "translated" else (f"{trans}\n原文：{orig}" if trans != orig else orig)
+                        disp = trans if tmode == "translated" else (f"{trans}\n中文：{orig}" if trans != orig else orig)
                         if not await self._realtime_send(event, [Comp.Plain(disp)]):
                             logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
                         wav = await self.engine.synthesize(trans, voice, pre_translated=True)
