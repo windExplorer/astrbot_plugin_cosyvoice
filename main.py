@@ -753,6 +753,13 @@ class CosyVoicePlugin(Star):
         # 服务端熔断冷却期：不再向服务端发任何请求，直接回退文字，避免一直卡着连文字也不发。
         # 文字在结果链（合并 both）会正常发出；已移除（voice_only / 不合并 both）需补发回去。
         if self._server_cooldown_until and time.time() < self._server_cooldown_until:
+            # 冷却期内原本静默回退文字，导致「为什么突然不发语音了」完全无从排查。
+            # 这里补一条 WARNING，带上剩余冷却秒数，默认日志级别即可看见。
+            logger.warning(
+                f"[cosyvoice] 处于语音冷却期，本次不合成语音、只发文字 | "
+                f"剩余 {self._server_cooldown_until - time.time():.0f}s | "
+                f"冷却由上一次合成失败触发（时长见配置 tts_cooldown_sec，默认 30s）"
+            )
             if not text_in_chain:
                 await self._fallback_text(event, full_text, send_mode, text_in_chain)
             return
@@ -949,7 +956,10 @@ class CosyVoicePlugin(Star):
                                     except Exception as e:  # noqa: BLE001
                                         logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
                                 else:
-                                    logger.warning("[cosyvoice] 分段语音合成失败（跳过该段）")
+                                    logger.warning(
+                                        f"[cosyvoice] 分段语音合成失败（跳过该段）: "
+                                        f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
+                                    )
                             else:
                                 # 本段无外文可读（纯中文）：仅发文字、不发声
                                 logger.debug("[cosyvoice] 本段无外文，仅发文字（跳过语音）")
@@ -969,7 +979,10 @@ class CosyVoicePlugin(Star):
                                     except Exception as e:  # noqa: BLE001
                                         logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
                                 else:
-                                    logger.warning("[cosyvoice] 分段语音合成失败（跳过该段）")
+                                    logger.warning(
+                                        f"[cosyvoice] 分段语音合成失败（跳过该段）: "
+                                        f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
+                                    )
                             else:
                                 logger.debug("[cosyvoice] 本段无外文，仅发文字（跳过语音）")
                     if not sent_any:
@@ -1018,7 +1031,10 @@ class CosyVoicePlugin(Star):
                                     except Exception as e:  # noqa: BLE001
                                         logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
                                 else:
-                                    logger.warning("[cosyvoice] 分段语音合成失败（跳过该段）")
+                                    logger.warning(
+                                        f"[cosyvoice] 分段语音合成失败（跳过该段）: "
+                                        f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
+                                    )
                                 if not await self._realtime_send(event, [Comp.Plain(seg)]):
                                     logger.warning("[cosyvoice] 分段文字发送失败（已尝试补发）")
                             else:
@@ -1034,7 +1050,10 @@ class CosyVoicePlugin(Star):
                                     except Exception as e:  # noqa: BLE001
                                         logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
                                 else:
-                                    logger.warning("[cosyvoice] 分段语音合成失败（跳过该段）")
+                                    logger.warning(
+                                        f"[cosyvoice] 分段语音合成失败（跳过该段）: "
+                                        f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
+                                    )
                         if not sent_any:
                             logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
                             await self._enter_cooldown(
