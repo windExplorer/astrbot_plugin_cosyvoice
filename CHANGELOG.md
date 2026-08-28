@@ -2,6 +2,14 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.1.15 (2026-08-28)
+
+- fix: 修复配置面板「看不到配置项」的根因。`metadata.yaml` 的 `config` 段此前被截断为仅剩 3 个键（auto_breath/auto_effect/effect_intensity），导致 AstrBot 加载后只生成残缺的 `_conf_schema.json`，面板丢失 send_mode/voices/auto_tts 等约 30 项；用户也因此找不到情绪/换气开关。
+  - 按完整的 `_conf_schema.json` 手工重建 `metadata.yaml` 的 `config` 段（约 33 项 + 3 项新增全部补全）。
+  - 同步把 3 个新增键补回 `_conf_schema.json`，双保险：即使 AstrBot 不重新生成 schema，面板也能看到。
+  - 注意：本仓库此前发布的 v2.1.14 压缩包内 metadata.yaml 即残缺版，请改用 v2.1.15 压缩包重新安装/重载。
+- 版本 v2.1.14 → v2.1.15。
+
 ## v2.1.14 (2026-08-28)
 
 - fix: 双语回复「中文被念出来」根因修复。原 `on_decorating` 仅在 `len(segs) > 1` 时才构建 `seg_items`，导致双语回复被 `split_text` 视为单段时落到非翻译分支，直接把含中文的 `display_text` 整段念出。

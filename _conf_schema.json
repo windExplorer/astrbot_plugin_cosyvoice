@@ -322,5 +322,26 @@
     "description": "QQ 等多行消息：遇到换行先按行切分，再各自合成",
     "hint": "默认 true。开启后：一个或连续多个换行 \\n 都视为硬分段边界，逐行 strip 去空，每行独立分段/合成，不跨行合并（多行语义通常独立）。避免把换行符念成噪音/静音，也避免超长行一次合成。关闭则整段按标点窗口分段（旧行为）。",
     "default": true
+  },
+  "auto_breath": {
+    "type": "bool",
+    "title": "自动标点换气",
+    "description": "自动标点换气：句末插 [breath]、句中插 [quick_breath]，让语音更自然",
+    "hint": "句末自动插入换气标记，让语音更自然；默认开启，低风险。",
+    "default": true
+  },
+  "auto_effect": {
+    "type": "bool",
+    "title": "关键词音效",
+    "description": "关键词音效：笑/叹气/咳嗽等按语种词典在句末追加 [laughter]/[sigh]/[cough]",
+    "hint": "开启后按语种词典在句末追加情绪音效；默认关闭，需手动开启。",
+    "default": false
+  },
+  "effect_intensity": {
+    "type": "string",
+    "title": "关键词音效密度",
+    "description": "关键词音效密度：light（每句≤1）/ medium（≤3）/ strong（≤5）。仅 auto_effect=true 时生效。",
+    "hint": "仅 auto_effect=true 时生效；light/medium/strong 控制每轮追加音效上限。",
+    "default": "medium"
   }
 }
