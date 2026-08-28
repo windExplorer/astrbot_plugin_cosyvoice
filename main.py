@@ -715,8 +715,8 @@ class CosyVoicePlugin(Star):
                 audio_text = _strip_chinese(full_text)
                 segs = self.engine.split_text(full_text)
                 if len(segs) > 1:
-                    # 多段：每段语音文本取「去中文后的外文」；纯中文段退化为原文（不出错）
-                    seg_items = [(seg, _strip_chinese(seg) or seg) for seg in segs]
+                    # 多段：每段语音文本取「去中文后的外文」；纯中文段 trans 为空，发送时只发文字不发声
+                    seg_items = [(seg, _strip_chinese(seg)) for seg in segs]
                     display_text = full_text
                 # 单行：display_text 保持 full_text；audio_text 已为去中文外文
             elif tmode == "original":
@@ -856,32 +856,39 @@ class CosyVoicePlugin(Star):
                         disp = trans if tmode == "translated" else (orig if bilingual else (f"{trans}\n中文：{orig}" if trans != orig else orig))
                         if text_after_voice:
                             # 先语音后文字：语音成功先发语音，再发对应文字；语音失败也补发文字（不丢）
-                            wav = await self.engine.synthesize(trans, voice, pre_translated=True)
-                            if wav:
-                                sent_any = True
-                                audio.schedule_cleanup(wav)
-                                try:
-                                    await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
-                                except Exception as e:  # noqa: BLE001
-                                    logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
+                            if trans.strip():
+                                wav = await self.engine.synthesize(trans, voice, pre_translated=True)
+                                if wav:
+                                    sent_any = True
+                                    audio.schedule_cleanup(wav)
+                                    try:
+                                        await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
+                                    except Exception as e:  # noqa: BLE001
+                                        logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
+                                else:
+                                    logger.warning("[cosyvoice] 分段语音合成失败（跳过该段）")
                             else:
-                                logger.warning("[cosyvoice] 分段语音合成失败（跳过该段）")
+                                # 本段无外文可读（纯中文）：仅发文字、不发声
+                                logger.debug("[cosyvoice] 本段无外文，仅发文字（跳过语音）")
                             if not await self._realtime_send(event, [Comp.Plain(disp)]):
                                 logger.warning("[cosyvoice] 分段文字发送失败（已尝试补发）")
                         else:
                             # 先文字后语音（原行为）
                             if not await self._realtime_send(event, [Comp.Plain(disp)]):
                                 logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
-                            wav = await self.engine.synthesize(trans, voice, pre_translated=True)
-                            if wav:
-                                sent_any = True
-                                audio.schedule_cleanup(wav)
-                                try:
-                                    await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
-                                except Exception as e:  # noqa: BLE001
-                                    logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
+                            if trans.strip():
+                                wav = await self.engine.synthesize(trans, voice, pre_translated=True)
+                                if wav:
+                                    sent_any = True
+                                    audio.schedule_cleanup(wav)
+                                    try:
+                                        await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
+                                    except Exception as e:  # noqa: BLE001
+                                        logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
+                                else:
+                                    logger.warning("[cosyvoice] 分段语音合成失败（跳过该段）")
                             else:
-                                logger.warning("[cosyvoice] 分段语音合成失败（跳过该段）")
+                                logger.debug("[cosyvoice] 本段无外文，仅发文字（跳过语音）")
                     if not sent_any:
                         logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
                         await self._enter_cooldown(
