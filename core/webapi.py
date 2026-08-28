@@ -350,6 +350,35 @@ def _fmt_origin(origin: str) -> str:
     return str(origin)
 
 
+def _parse_origin(origin: str) -> dict:
+    """把 unified_msg_origin 解析成结构化字段（best-effort），供 WebUI 友好展示。
+
+    常见格式：
+      - 群聊：<平台>:<群号>:<QQ号>  ->  group_id / user_id 都有
+      - 私聊：<平台>:<QQ号>        ->  仅 user_id
+    """
+    parts = str(origin).split(":")
+    platform = parts[0] if parts else ""
+    if len(parts) >= 3:
+        group_id, user_id = parts[1], parts[2]
+    elif len(parts) == 2:
+        group_id, user_id = "", parts[1]
+    else:
+        group_id = user_id = ""
+    if group_id:
+        label = f"群 {group_id} · 用户 {user_id}"
+    elif user_id:
+        label = f"用户 {user_id}"
+    else:
+        label = str(origin)
+    return {
+        "platform": platform,
+        "group_id": group_id,
+        "user_id": user_id,
+        "label": label,
+    }
+
+
 # ---------- 会话列表 ----------
 def _list_sessions(plugin):
     async def handler():
@@ -363,9 +392,15 @@ def _list_sessions(plugin):
             sm = plugin._sendmodes.get(origin)
             mode = {"both": "语音+文字", "voice_only": "仅语音"}.get(sm, "默认(跟随全局)")
             prob = raw if isinstance(raw, (int, float)) else (1.0 if on else None)
+            parsed = _parse_origin(origin)
             sessions.append({
                 "id": origin,
                 "user": _fmt_origin(origin),
+                "platform": parsed["platform"],
+                "group_id": parsed["group_id"],
+                "user_id": parsed["user_id"],
+                "label": parsed["label"],
+                "nickname": plugin._nicknames.get(origin, ""),
                 "on": on,
                 "mode": mode,
                 "voice": plugin._voices.get(origin, "") or "默认",

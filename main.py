@@ -109,6 +109,9 @@ class CosyVoicePlugin(Star):
         self._voices_lib = self._load_voices_lib()
         # WebUI 概览「最近事件」环形缓冲（进程内，不持久化；最多 20 条）
         self._recent_events = []
+        # 会话级昵称（按群/私聊持久记忆）：unified_msg_origin -> 昵称（best-effort，取自事件 sender_name）
+        self._nickname_file = os.path.join(data_dir, "tts_nicknames.json")
+        self._nicknames = self._load_nicknames()
 
     def _data_dir(self) -> str:
         """持久数据目录。
@@ -244,6 +247,18 @@ class CosyVoicePlugin(Star):
         os.makedirs(os.path.dirname(self._session_file), exist_ok=True)
         with open(self._session_file, "w", encoding="utf-8") as f:
             json.dump(self._sessions, f, ensure_ascii=False, indent=2)
+
+    def _load_nicknames(self) -> dict:
+        try:
+            with open(self._nickname_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_nicknames(self):
+        os.makedirs(os.path.dirname(self._nickname_file), exist_ok=True)
+        with open(self._nickname_file, "w", encoding="utf-8") as f:
+            json.dump(self._nicknames, f, ensure_ascii=False, indent=2)
 
     def _session_enabled(self, event: AstrMessageEvent) -> bool:
         return event.unified_msg_origin in self._sessions
@@ -596,6 +611,14 @@ class CosyVoicePlugin(Star):
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent):
         cfg = self._refresh_cfg()
+
+        # 记录会话昵称（best-effort，取自事件 sender_name），供 WebUI 会话列表友好展示；
+        # 放在最前，确保即使被 suppress / 未命中 TTS 也照样记录（用户只想给任意会话配音色）。
+        origin = event.unified_msg_origin
+        nick = getattr(event, "sender_name", "") or ""
+        if nick and self._nicknames.get(origin) != nick:
+            self._nicknames[origin] = nick
+            self._save_nicknames()
 
         # 本插件的 /tts 指令或 LLM 工具已自行发送语音，避免重复
         if self._get_flag(event, "suppress", False):
