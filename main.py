@@ -927,10 +927,17 @@ class CosyVoicePlugin(Star):
             if merge:
                 path = await self.engine.synthesize(synth_text, voice, pre_translated=True)
                 if not path:
-                    logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
-                    await self._enter_cooldown(
-                        event, send_mode, display_text, text_in_chain=text_in_chain
-                    )
+                    # 仅服务端故障才冷却，配置/内容类失败不冷却（理由见下方逐段分支）
+                    if getattr(self.engine, "last_failure_kind", "server") == "server":
+                        logger.warning("[cosyvoice] 后台合成失败（服务端故障），进入冷却并回退文字")
+                        await self._enter_cooldown(
+                            event, send_mode, display_text, text_in_chain=text_in_chain
+                        )
+                    else:
+                        logger.warning(
+                            f"[cosyvoice] 后台合成失败（非服务端故障，不进冷却）: "
+                            f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
+                        )
                     return
                 audio.schedule_cleanup(path)
                 await self._realtime_send(event, [Comp.Record(file=path, url=path)])
@@ -986,10 +993,17 @@ class CosyVoicePlugin(Star):
                             else:
                                 logger.debug("[cosyvoice] 本段无外文，仅发文字（跳过语音）")
                     if not sent_any:
-                        logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
-                        await self._enter_cooldown(
-                            event, send_mode, display_text, text_in_chain=text_in_chain
-                        )
+                        # 仅服务端故障才冷却，配置/内容类失败不冷却（理由见下方逐段分支）
+                        if getattr(self.engine, "last_failure_kind", "server") == "server":
+                            logger.warning("[cosyvoice] 后台合成失败（服务端故障），进入冷却并回退文字")
+                            await self._enter_cooldown(
+                                event, send_mode, display_text, text_in_chain=text_in_chain
+                            )
+                        else:
+                            logger.warning(
+                                f"[cosyvoice] 后台合成失败（非服务端故障，不进冷却）: "
+                                f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
+                            )
                         return
                 elif send_mode == "both":
                     # 未走翻译多段分支时（没开翻译 / original 模式 / 单行翻译）：
@@ -1055,10 +1069,20 @@ class CosyVoicePlugin(Star):
                                         f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
                                     )
                         if not sent_any:
-                            logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
-                            await self._enter_cooldown(
-                                event, send_mode, display_text, text_in_chain=text_in_chain
-                            )
+                            # 仅「服务端故障」才熔断冷却。配置/内容类失败（无音色、
+                            # 无有效可合成文本）冷却毫无意义——重试也不会好转，
+                            # 反而会让「插件刚重载、配置尚未就绪」被误判成服务器失联，
+                            # 静默停发语音 30s，还给出误导性的失联提示。
+                            if getattr(self.engine, "last_failure_kind", "server") == "server":
+                                logger.warning("[cosyvoice] 后台合成失败（服务端故障），进入冷却并回退文字")
+                                await self._enter_cooldown(
+                                    event, send_mode, display_text, text_in_chain=text_in_chain
+                                )
+                            else:
+                                logger.warning(
+                                    f"[cosyvoice] 后台合成失败（非服务端故障，不进冷却）: "
+                                    f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
+                                )
                             return
                     else:
                         # 单行（无换行/句末标点分段）：按 text_after_voice 决定文字与语音先后
@@ -1075,10 +1099,20 @@ class CosyVoicePlugin(Star):
                             except Exception as e:  # noqa: BLE001
                                 logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
                         if not sent_any:
-                            logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
-                            await self._enter_cooldown(
-                                event, send_mode, display_text, text_in_chain=text_in_chain
-                            )
+                            # 仅「服务端故障」才熔断冷却。配置/内容类失败（无音色、
+                            # 无有效可合成文本）冷却毫无意义——重试也不会好转，
+                            # 反而会让「插件刚重载、配置尚未就绪」被误判成服务器失联，
+                            # 静默停发语音 30s，还给出误导性的失联提示。
+                            if getattr(self.engine, "last_failure_kind", "server") == "server":
+                                logger.warning("[cosyvoice] 后台合成失败（服务端故障），进入冷却并回退文字")
+                                await self._enter_cooldown(
+                                    event, send_mode, display_text, text_in_chain=text_in_chain
+                                )
+                            else:
+                                logger.warning(
+                                    f"[cosyvoice] 后台合成失败（非服务端故障，不进冷却）: "
+                                    f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
+                                )
                             return
                         if text_after_voice:
                             # 语音已发，再补发整条文字（先听后读）
@@ -1106,10 +1140,20 @@ class CosyVoicePlugin(Star):
                                 except Exception as e:  # noqa: BLE001
                                     logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
                         if not sent_any:
-                            logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
-                            await self._enter_cooldown(
-                                event, send_mode, display_text, text_in_chain=text_in_chain
-                            )
+                            # 仅「服务端故障」才熔断冷却。配置/内容类失败（无音色、
+                            # 无有效可合成文本）冷却毫无意义——重试也不会好转，
+                            # 反而会让「插件刚重载、配置尚未就绪」被误判成服务器失联，
+                            # 静默停发语音 30s，还给出误导性的失联提示。
+                            if getattr(self.engine, "last_failure_kind", "server") == "server":
+                                logger.warning("[cosyvoice] 后台合成失败（服务端故障），进入冷却并回退文字")
+                                await self._enter_cooldown(
+                                    event, send_mode, display_text, text_in_chain=text_in_chain
+                                )
+                            else:
+                                logger.warning(
+                                    f"[cosyvoice] 后台合成失败（非服务端故障，不进冷却）: "
+                                    f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
+                                )
                             return
                     else:
                         sent_any = False
@@ -1123,10 +1167,20 @@ class CosyVoicePlugin(Star):
                                 # 单段发送失败只跳过该段，不影响后续段继续发出
                                 logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
                         if not sent_any:
-                            logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
-                            await self._enter_cooldown(
-                                event, send_mode, display_text, text_in_chain=text_in_chain
-                            )
+                            # 仅「服务端故障」才熔断冷却。配置/内容类失败（无音色、
+                            # 无有效可合成文本）冷却毫无意义——重试也不会好转，
+                            # 反而会让「插件刚重载、配置尚未就绪」被误判成服务器失联，
+                            # 静默停发语音 30s，还给出误导性的失联提示。
+                            if getattr(self.engine, "last_failure_kind", "server") == "server":
+                                logger.warning("[cosyvoice] 后台合成失败（服务端故障），进入冷却并回退文字")
+                                await self._enter_cooldown(
+                                    event, send_mode, display_text, text_in_chain=text_in_chain
+                                )
+                            else:
+                                logger.warning(
+                                    f"[cosyvoice] 后台合成失败（非服务端故障，不进冷却）: "
+                                    f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
+                                )
                             return
             # 整轮成功后才登记幂等 + 解除冷却
             self._mark_server_ok()

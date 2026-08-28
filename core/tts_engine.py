@@ -142,6 +142,11 @@ class TtsEngine:
         self.voices: dict = {}
         # 最近一次合成失败的原因（供 WebUI 试听接口透传，避免只显示「无有效音频」兜底文案）
         self.last_failure = ""
+        # 失败类型：config=配置问题（无音色等）、content=内容问题（无有效可合成文本）、
+        # server=服务端故障。仅 server 才应触发熔断冷却——
+        # 配置/内容问题重试也不会好转，进冷却只会让「插件刚重载、配置尚未就绪」
+        # 被误判成服务器失联，并静默停发语音 30s（且给出误导性的失联提示）。
+        self.last_failure_kind = ""
         # 全局合成并发信号量：限制同时打到 TTS 服务端的请求数。
         # 弱服务端（GPU 推理）扛不住多并发，多用户同时触发时不限制会把服务端打爆
         # （连接排队 + 读超时雪崩）。默认 1 = 完全串行，最稳；可调大若服务端够强。
@@ -526,9 +531,11 @@ class TtsEngine:
     async def synthesize(self, text: str, voice_name: str | None = None, *, pre_translated: bool = False) -> str | None:
         """合成文本并返回 wav 文件路径；无可用音色或失败返回 None。"""
         self.last_failure = ""
+        self.last_failure_kind = ""
         name, prompt_wav, prompt_text = self.resolve_voice(voice_name)
         if name is None:
             self.last_failure = "未配置任何可用音色（请在插件配置/WebUI 里选一个可用音色）"
+            self.last_failure_kind = "config"
             logger.warning(
                 f"[cosyvoice] 未配置任何可用音色，跳过语音合成。"
                 f"运行实例读到的 raw voices={repr(self.config.get('voices'))[:300]}"
@@ -542,6 +549,7 @@ class TtsEngine:
         chunks = [c for c in self.split_text(text) if is_speakable(c)]
         if not chunks:
             self.last_failure = f"无有效可合成文本（被过滤为空白/纯符号）：{text!r}"
+            self.last_failure_kind = "content"
             # 提升到 WARNING：否则默认日志级别下这行被吞，WebUI 只会显示「无有效音频/纯符号」兜底文案，难以定位真因
             logger.warning(
                 f"[cosyvoice] 无有效可合成文本，跳过语音合成。"
@@ -570,6 +578,7 @@ class TtsEngine:
                     pcms.append(pcm)
             if not pcms:
                 self.last_failure = "所有分段合成均返回空音频（很可能音色参考音频 prompt_wav 路径不对或文件缺失，服务端拒绝零样本合成）"
+                self.last_failure_kind = "server"
                 logger.warning("[cosyvoice] 合并合成完成：0 段成功，无有效音频")
                 return None
             combined = b"".join(pcms)
@@ -584,6 +593,7 @@ class TtsEngine:
             raise
         except Exception as e:  # noqa: BLE001
             self.last_failure = f"语音合成异常：{e}"
+            self.last_failure_kind = "server"
             logger.error(f"[cosyvoice] 语音合成失败: {e}")
             return None
 
