@@ -904,9 +904,11 @@ class CosyVoicePlugin(Star):
                             )
                             return
                     else:
-                        # 单行：先整条发文字，再逐段发译文语音（原行为，单组件消息平台兼容）
-                        if not await self._realtime_send(event, [Comp.Plain(display_text)]):
-                            logger.warning("[cosyvoice] 整条文字发送失败（语音仍尝试）")
+                        # 单行（无换行/句末标点分段）：按 text_after_voice 决定文字与语音先后
+                        if not text_after_voice:
+                            # 先文字后语音（原行为，单组件消息平台兼容）
+                            if not await self._realtime_send(event, [Comp.Plain(display_text)]):
+                                logger.warning("[cosyvoice] 整条文字发送失败（语音仍尝试）")
                         sent_any = False
                         async for wav in self.engine.iter_segment_wavs(synth_text, voice, pre_translated=True):
                             sent_any = True
@@ -921,6 +923,10 @@ class CosyVoicePlugin(Star):
                                 event, send_mode, display_text, text_in_chain=text_in_chain
                             )
                             return
+                        if text_after_voice:
+                            # 语音已发，再补发整条文字（先听后读）
+                            if not await self._realtime_send(event, [Comp.Plain(display_text)]):
+                                logger.warning("[cosyvoice] 整条文字发送失败（已尝试补发）")
                 else:
                     # voice_only：只发语音段，文字由 LLM completion_text 存会话历史兜底
                     if seg_items:
