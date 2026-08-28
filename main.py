@@ -1507,8 +1507,10 @@ class CosyVoicePlugin(Star):
         """将指定文本转换为语音并朗读出来（临时念一次，不开启长期语音模式）。
         仅在用户明确给出要朗读的具体文本（如「把这段话念出来 / 朗读以下内容」）时使用。
         注意：若用户想「长期用语音交流」，请调用 set_voice_mode，不要调本工具。
-        若当前聊天已开启语音模式（/tts_on 或全局 auto_tts），本工具会直接拒绝执行，
-        请改用文字正常回复，由插件自动朗读最终回复。
+        若当前聊天已开启语音模式（/tts_on 或全局 auto_tts）且语音服务端正常，
+        本工具会直接拒绝执行，请改用文字正常回复，由插件自动朗读最终回复。
+        例外：语音服务端处于冷却/失联时本工具仍会响应——此时自动语音发不出声，
+        工具是唯一兜底，不能一并拒绝。
 
         Args:
             text(string): 需要朗读的文本内容
@@ -1519,17 +1521,22 @@ class CosyVoicePlugin(Star):
         if not self.config.get("enable_llm_tool", True):
             return "语音功能还没开呢，先把它打开我就能念啦～"
 
-        # 已开启「自动语音模式」（本会话 /tts_on 或全局 auto_tts）时，不应再手动调本工具：
-        # 自动语音环节会朗读最终回复，手动调用反而会因 suppress 标志杀掉自动语音、
-        # 且把回复拆成「调工具前 / 调工具后」多条消息。直接拒绝并引导模型用文字回复即可。
-        if bool(cfg.get("auto_tts", False)) or self._session_prob(event) is not None:
-            return ("当前聊天已开启语音模式，无需调用本工具。请直接把要说的写进文字回复，"
-                    "插件会自动把回复合成语音发送。")
-
-        # 服务端熔断冷却期内，直接提示，不再去打已坏的服务端
+        # 服务端熔断冷却期内，直接提示，不再去打已坏的服务端。
+        # 顺序要点：必须排在「已开启语音模式则拒绝工具」之前——
+        # 冷却期间自动语音这条路已经发不出声（on_decorating_result 静默回退文字），
+        # 若此时还把工具一并拒绝，两条通道会同时失效，用户彻底收不到语音，
+        # 表现为「关掉 /tts_on 反而能出声」。冷却时由这里统一给出失联提示。
         if self._server_cooldown_until and time.time() < self._server_cooldown_until:
             await self._realtime_send(event, [Comp.Plain(SERVER_DOWN_TIP)])
             return "语音服务器暂时失联，已用文字回复你。"
+
+        # 已开启「自动语音模式」（本会话 /tts_on 或全局 auto_tts）时，不应再手动调本工具：
+        # 自动语音环节会朗读最终回复，手动调用反而会因 suppress 标志杀掉自动语音、
+        # 且把回复拆成「调工具前 / 调工具后」多条消息。直接拒绝并引导模型用文字回复即可。
+        # 仅在服务端健康时才拒绝（冷却情形已在上面返回）。
+        if bool(cfg.get("auto_tts", False)) or self._session_prob(event) is not None:
+            return ("当前聊天已开启语音模式，无需调用本工具。请直接把要说的写进文字回复，"
+                    "插件会自动把回复合成语音发送。")
 
         self._set_flag(event, "suppress", True)
         if voice:
