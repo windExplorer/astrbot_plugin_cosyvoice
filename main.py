@@ -273,8 +273,9 @@ class CosyVoicePlugin(Star):
         if not self._server_down:
             self._server_down = True
             try:
+                # 直接传组件列表：chain_result() 会改写事件自身结果链，主动推送无需也不应改动它
                 await self.context.send_message(
-                    event.unified_msg_origin, event.chain_result([Comp.Plain(tip)])
+                    event.unified_msg_origin, [Comp.Plain(tip)]
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[cosyvoice] 失联提示发送失败: {e}")
@@ -563,24 +564,29 @@ class CosyVoicePlugin(Star):
         2) self.context.send_message(unified_msg_origin, chain)：AstrBot 官方主动消息 API。
 
         :return: True=发送成功；False=两条通道都失败（调用方可降级处理，如分开补发）。
-        注意：部分平台对「主动推送的组合消息（Plain+Record）」可能只展示语音、
+        注意：① 这里不能调用 event.chain_result()——那会改写事件自身的结果链，
+        在 LLM 工具（tool_loop）执行期间调用会与 agent runner 的结果处理冲突，
+        导致语音被静默丢弃（且 event.send 不抛异常，工具会误报「已发送」）。
+        直接传组件列表即可，事件自身结果保持不动。
+        ② 部分平台对「主动推送的组合消息（Plain+Record）」可能只展示语音、
         静默丢弃文字，因此调用方应尽量用单组件消息（文字、语音分开发）。
         """
         types = [type(c).__name__ for c in records]
+        # 不再调用 event.chain_result()，避免篡改事件结果链（见上方说明 ①）
+        chain = list(records)
         try:
-            chain = event.chain_result(records)
             send = getattr(event, "send", None)
             if callable(send):
                 try:
                     await send(chain)
-                    logger.debug(f"[cosyvoice] event.send 发送成功 组件={types}")
+                    logger.info(f"[cosyvoice] 主动推送成功(event.send) 组件={types}")
                     return True
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
                         f"[cosyvoice] event.send 实时发送失败（尝试 context.send_message）: {e}"
                     )
             await self.context.send_message(event.unified_msg_origin, chain)
-            logger.debug(f"[cosyvoice] context.send_message 发送成功 组件={types}")
+            logger.info(f"[cosyvoice] 主动推送成功(context.send_message) 组件={types}")
             return True
         except Exception as e:  # noqa: BLE001
             logger.warning(
@@ -1110,8 +1116,9 @@ class CosyVoicePlugin(Star):
             f"[cosyvoice] 补发完整文字 | send_mode={send_mode} 长度={len(full_text)}字"
         )
         try:
+            # 直接传组件列表：chain_result() 会改写事件自身结果链，主动推送无需也不应改动它
             await self.context.send_message(
-                event.unified_msg_origin, event.chain_result([Comp.Plain(full_text)])
+                event.unified_msg_origin, [Comp.Plain(full_text)]
             )
             logger.info("[cosyvoice] 语音失败，已退化为补发文字")
         except Exception as e:  # noqa: BLE001
@@ -1482,19 +1489,28 @@ class CosyVoicePlugin(Star):
                     return "语音合成失败，已告知用户。"
                 audio.schedule_cleanup(path)
                 # 生效发送方式为 both（tts_type/send_mode）时，语音之外补发文字；否则只发语音
-                await self._realtime_send(event, [Comp.Record(file=path, url=path)])
+                if not await self._realtime_send(event, [Comp.Record(file=path, url=path)]):
+                    # 合成成功但推送失败：如实上报，不再谎报「已发送给用户」
+                    await self._realtime_send(event, [Comp.Plain("语音合成好了，但发送失败，待会儿再试试？")])
+                    return "语音合成成功，但主动推送失败，已用文字告知用户。"
                 if self._effective_send_mode(event, cfg) == "both":
                     await self._realtime_send(event, [Comp.Plain(text)])
             else:
                 # 不合并：边合成边逐段主动发送（每段独立一条消息，服务端返回一段即发一段）
                 sent = False
+                sent_ok = False
                 async for wav in self.engine.iter_segment_wavs(tts_text, target_voice):
                     sent = True
-                    await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
+                    if await self._realtime_send(event, [Comp.Record(file=wav, url=wav)]):
+                        sent_ok = True
                     audio.schedule_cleanup(wav)
                 if not sent:
                     await self._realtime_send(event, [Comp.Plain("话到嘴边卡壳了，这次没念出来，待会儿再试试？")])
                     return "语音合成失败，已告知用户。"
+                if not sent_ok:
+                    # 合成成功但推送失败：如实上报，不再谎报「已发送给用户」
+                    await self._realtime_send(event, [Comp.Plain("语音合成好了，但发送失败，待会儿再试试？")])
+                    return "语音合成成功，但主动推送失败，已用文字告知用户。"
                 # both 时语音之外补发文字（voice_only 仍只发语音）
                 if self._effective_send_mode(event, cfg) == "both":
                     await self._realtime_send(event, [Comp.Plain(text)])

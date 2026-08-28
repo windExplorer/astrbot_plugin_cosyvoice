@@ -2,6 +2,15 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.1.17 (2026-08-28)
+
+- fix: 修复 LLM 工具 `text_to_speech` 合成成功但用户收不到语音的问题（翻译与合成本身正常，日志可见「合成 1/1 OK」）。
+  - 根因：主动推送前调用了 `event.chain_result(records)`，该调用会**改写事件自身的结果链**；在 tool_loop 执行期间调用会与 agent runner 的结果处理冲突，导致语音被静默丢弃，且 `event.send()` 不抛异常，工具仍谎报「已发送给用户」。
+  - `_realtime_send` 不再调用 `event.chain_result()`，直接传组件列表，事件自身结果保持不动；失联提示、失败兜底补发文字两处同样改掉。
+  - 工具路径现在检查 `_realtime_send` 返回值：推送失败会如实返回「合成成功但推送失败」并发文字告知，不再谎报成功。
+  - 推送成功日志从 DEBUG 提到 INFO，便于在日志里确认走了 `event.send` 还是 `context.send_message`。
+- 版本 v2.1.16 → v2.1.17。
+
 ## v2.1.16 (2026-08-28)
 
 - fix: 修复翻译场景「文字被拆成两条、语音重复发送」。翻译分支此前也有 `len(segs) > 1` 门槛：单段中文原文翻译后只设了 audio_text/display_text、没设 seg_items，非合并发送会落到非翻译分支，把 display_text（译文+换行+中文：原文）按换行二次切分。
