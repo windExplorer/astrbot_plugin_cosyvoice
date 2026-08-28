@@ -1039,8 +1039,9 @@ class CosyVoicePlugin(Star):
                 yield wav
 
     async def _tts_cmd_impl(self, event: AstrMessageEvent, text: str, mode: str, empty_hint: str):
-        """指令类合成公共逻辑：只发语音（不随 send_mode 发文字）；失败按失联/繁忙/偶发分别提示。"""
-        # 括号内容不朗读：指令只发语音，故括号内容仅剥离不念（不额外补发文字）
+        """指令类合成公共逻辑：发送方式遵循 tts_type/send_mode——both 时语音之外补发文字，voice_only 时只发语音。"""
+        # 保留原始文本（含括号），用于 both 模式下补发文字；括号内容不进入语音合成
+        orig_text = text
         if self.config.get("skip_bracket_tts", True):
             text = self._strip_brackets(text)
             if not text.strip():
@@ -1060,6 +1061,8 @@ class CosyVoicePlugin(Star):
             if not sent:
                 yield event.plain_result(empty_hint)
             else:
+                if self._effective_send_mode(event, self._refresh_cfg()) == "both":
+                    yield event.plain_result(orig_text)
                 self._push_event(True, "指令语音已发送")
         except QueueFullError:
             # 排队过长：服务端在线但繁忙，进冷却避免反复打繁忙服务器，提示稍后再试
@@ -1107,7 +1110,7 @@ class CosyVoicePlugin(Star):
 
     @filter.command("tts1")
     async def tts1_cmd(self, event: AstrMessageEvent):
-        """/tts1 文本：按换行符分段，每段一条语音逐条念（只发语音）。"""
+        """/tts1 文本：按换行符分段，每段一条语音逐条念（both 时同时发文字）。"""
         self._refresh_cfg()
         raw = (event.message_str or "").strip()
         text = re.sub(r"^[/\s@]*tts1\b\s*", "", raw, flags=re.IGNORECASE).strip()
@@ -1367,8 +1370,10 @@ class CosyVoicePlugin(Star):
                     await self._realtime_send(event, [Comp.Plain("话到嘴边卡壳了，这次没念出来，待会儿再试试？")])
                     return "语音合成失败，已告知用户。"
                 audio.schedule_cleanup(path)
-                # 只发语音，不随 send_mode 发文字（文字由 LLM 结果链/历史保留）
+                # 生效发送方式为 both（tts_type/send_mode）时，语音之外补发文字；否则只发语音
                 await self._realtime_send(event, [Comp.Record(file=path, url=path)])
+                if self._effective_send_mode(event, cfg) == "both":
+                    await self._realtime_send(event, [Comp.Plain(text)])
             else:
                 # 不合并：边合成边逐段主动发送（每段独立一条消息，服务端返回一段即发一段）
                 sent = False
@@ -1379,6 +1384,9 @@ class CosyVoicePlugin(Star):
                 if not sent:
                     await self._realtime_send(event, [Comp.Plain("话到嘴边卡壳了，这次没念出来，待会儿再试试？")])
                     return "语音合成失败，已告知用户。"
+                # both 时语音之外补发文字（voice_only 仍只发语音）
+                if self._effective_send_mode(event, cfg) == "both":
+                    await self._realtime_send(event, [Comp.Plain(text)])
             self._mark_server_ok()
             self._push_event(True, "已用语音朗读并发送")
             return "已用语音朗读，语音已发送给用户。"
