@@ -819,23 +819,50 @@ class CosyVoicePlugin(Star):
                         )
                         return
                 elif send_mode == "both":
-                    # 原逻辑：先整条发文字，再逐段发译文语音（单组件消息平台兼容性最好）
-                    if not await self._realtime_send(event, [Comp.Plain(display_text)]):
-                        logger.warning("[cosyvoice] 整条文字发送失败（语音仍尝试）")
-                    sent_any = False
-                    async for wav in self.engine.iter_segment_wavs(synth_text, voice, pre_translated=True):
-                        sent_any = True
-                        audio.schedule_cleanup(wav)
-                        try:
-                            await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
-                        except Exception as e:  # noqa: BLE001
-                            logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
-                    if not sent_any:
-                        logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
-                        await self._enter_cooldown(
-                            event, send_mode, display_text, text_in_chain=text_in_chain
-                        )
-                        return
+                    # 未走翻译多段分支时（没开翻译 / original 模式 / 单行翻译）：
+                    # 文字也按「换行+句末标点」分段逐段发送，与语音逐段对齐——
+                    # 避免「有换行的文字只语音分段、文字却整块刷出」的不一致。
+                    segs = self.engine.split_text(display_text)
+                    if len(segs) > 1:
+                        sent_any = False
+                        for seg in segs:
+                            if not await self._realtime_send(event, [Comp.Plain(seg)]):
+                                logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
+                            seg_audio = self._strip_brackets(seg) if self.config.get("skip_bracket_tts", True) else seg
+                            wav = await self.engine.synthesize(seg_audio, voice, pre_translated=True)
+                            if wav:
+                                sent_any = True
+                                audio.schedule_cleanup(wav)
+                                try:
+                                    await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
+                                except Exception as e:  # noqa: BLE001
+                                    logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
+                            else:
+                                logger.warning("[cosyvoice] 分段语音合成失败（跳过该段）")
+                        if not sent_any:
+                            logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
+                            await self._enter_cooldown(
+                                event, send_mode, display_text, text_in_chain=text_in_chain
+                            )
+                            return
+                    else:
+                        # 单行：先整条发文字，再逐段发译文语音（原行为，单组件消息平台兼容）
+                        if not await self._realtime_send(event, [Comp.Plain(display_text)]):
+                            logger.warning("[cosyvoice] 整条文字发送失败（语音仍尝试）")
+                        sent_any = False
+                        async for wav in self.engine.iter_segment_wavs(synth_text, voice, pre_translated=True):
+                            sent_any = True
+                            audio.schedule_cleanup(wav)
+                            try:
+                                await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
+                            except Exception as e:  # noqa: BLE001
+                                logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
+                        if not sent_any:
+                            logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
+                            await self._enter_cooldown(
+                                event, send_mode, display_text, text_in_chain=text_in_chain
+                            )
+                            return
                 else:
                     # voice_only：只发语音段，文字由 LLM completion_text 存会话历史兜底
                     if seg_items:
