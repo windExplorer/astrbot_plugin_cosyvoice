@@ -37,6 +37,22 @@ from .utils import audio
 
 PLUGIN_ID = "astrbot_plugin_cosyvoice"
 
+# 双语识别与处理：当回复同时含「汉字」与「外语文字（假名/字母/数字/谚文等）」时，
+# 视为「外文原文 + 中文翻译」双语回复——语音应只念外文部分（剥离中文），
+# 文字展示仍按 translate_display_mode 保留双语，满足「看中文、听外文」。
+_CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+_FOREIGN_RE = re.compile(r"[A-Za-z0-9぀-ヿ가-힯]")
+
+
+def _strip_chinese(text: str) -> str:
+    """去除文本中的汉字，保留外文、数字与标点（双语回复时只朗读外文）。"""
+    return _CJK_RE.sub("", text)
+
+
+def _is_bilingual(text: str) -> bool:
+    """是否同时含汉字与外语文字（即「外文 + 中文翻译」双语）。"""
+    return bool(_CJK_RE.search(text) and _FOREIGN_RE.search(text))
+
 # 语音服务器连不上时统一给用户的提示（大模型也需要能看懂这是服务器故障）。
 # 提示均为「独立发送」的消息（主动推送 / 指令结果 / 工具补发），前面无正文，
 # 不再加前导换行，避免消息开头出现空白行。
@@ -689,10 +705,21 @@ class CosyVoicePlugin(Star):
         display_text = full_text
         audio_text = None
         seg_items = None  # 翻译多段时：(原文段, 译文段) 列表，供不合并模式逐段发送
+        bilingual = _is_bilingual(full_text)
         if self.translator is not None:
             vlang = self.engine.voice_language(voice)
             tmode = (cfg.get("translate_display_mode") or "both").strip().lower()
-            if tmode == "original":
+            if bilingual:
+                # 双语（外文 + 中文翻译）：语音只念外文（去中文），显示保留双语原文，
+                # 不做翻译（避免中文音色把外文翻成中文念出来，也避免整段把中文念出来）。
+                audio_text = _strip_chinese(full_text)
+                segs = self.engine.split_text(full_text)
+                if len(segs) > 1:
+                    # 多段：每段语音文本取「去中文后的外文」；纯中文段退化为原文（不出错）
+                    seg_items = [(seg, _strip_chinese(seg) or seg) for seg in segs]
+                    display_text = full_text
+                # 单行：display_text 保持 full_text；audio_text 已为去中文外文
+            elif tmode == "original":
                 # 只显示原文：不翻译，分段留给语音侧按 segment_punct 处理
                 pass
             else:
@@ -762,7 +789,7 @@ class CosyVoicePlugin(Star):
         task = asyncio.ensure_future(
             self._background_speak(
                 event, display_text, voice, send_mode, merge, origin, text_in_chain,
-                audio_text=audio_text, seg_items=seg_items,
+                audio_text=audio_text, seg_items=seg_items, bilingual=bilingual,
             )
         )
         # 避免「未等待的 Task 异常」警告刷屏
@@ -781,6 +808,7 @@ class CosyVoicePlugin(Star):
         self, event: AstrMessageEvent, display_text: str,
         voice, send_mode: str, merge: bool, origin: str, text_in_chain: bool = False,
         audio_text: str | None = None, seg_items: list | None = None,
+        bilingual: bool = False,
     ):
         """后台补发语音：不阻塞 on_decorating_result。
 
@@ -825,7 +853,7 @@ class CosyVoicePlugin(Star):
                     tmode = (self.config.get("translate_display_mode") or "both").strip().lower()
                     sent_any = False
                     for orig, trans in seg_items:
-                        disp = trans if tmode == "translated" else (f"{trans}\n中文：{orig}" if trans != orig else orig)
+                        disp = trans if tmode == "translated" else (orig if bilingual else (f"{trans}\n中文：{orig}" if trans != orig else orig))
                         if text_after_voice:
                             # 先语音后文字：语音成功先发语音，再发对应文字；语音失败也补发文字（不丢）
                             wav = await self.engine.synthesize(trans, voice, pre_translated=True)

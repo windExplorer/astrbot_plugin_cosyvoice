@@ -2,6 +2,10 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.1.11 (2026-08-28)
+
+- fix: 双语（外文原文 + 中文翻译）回复用中文音色时，语音不再把中文翻译念出来。检测到双语（同时含汉字与外语文字）时，语音合成文本统一取「去中文后的外文」朗读，文字展示仍按 `translate_display_mode` 保留双语原文（看中文、听外文）。纯中文 / 纯外文回复行为不变。
+
 ## v2.1.10 (2026-08-28)
 
 - fix: `text_to_speech` 工具内使用 `self._effective_send_mode(event, cfg)` 但 `cfg` 未定义，触发 `NameError`，被兜底 except 误判为「语音合成失败」。已在函数开头 `self._refresh_cfg()` 后补 `cfg = self.config`。修复后艾特「来段语音」、`/tts_on` 等走该工具的语音可正常发出。
