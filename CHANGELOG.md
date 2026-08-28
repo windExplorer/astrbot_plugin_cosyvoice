@@ -2,6 +2,14 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.1.13 (2026-08-28)
+
+- feat: 语音标记注入（规范见 docs/cosyvoice_tts_markup_guide.md）。新增 `core/markup.py`：
+  - `auto_breath`（默认开）：按语种标点集自动插换气标记，句末 `[breath]`、句中 `[quick_breath]`，连续标点只插一次、[quick_breath] 间隔 ≥8 字。
+  - `auto_effect`（默认关）：关键词音效，按语种词典在句末追加 `[laughter]`/`[sigh]`/`[cough]`，密度受 `effect_intensity`（light/medium/strong）控制，并排除「可笑的」等形容误触发。
+  - 标记白名单：`_strip_brackets` 不再误删 `[laughter]` 等朗读标记；所有标记只进合成文本，绝不进显示文字 / prompt_text。
+  - 接入三处合成路径：后台补发（合并/多段/单行 both）、`text_to_speech` 工具、`/tts` 指令。
+
 ## v2.1.12 (2026-08-28)
 
 - fix: 双语回复换行拆成多段时，纯中文段（无外文可读）不再被单独念成中文语音——该段只发文字、不发声，文字展示仍按 `translate_display_mode` 保留（bilingual 时显示双语原文）。去掉 v2.1.11 中纯中文段 `or seg` 的退化逻辑。

@@ -29,6 +29,7 @@ except Exception:  # noqa: BLE001
     LLMResponse = object  # type: ignore
 
 from .core.tts_engine import TtsEngine, is_speakable, clean_media_placeholders, clean_tts_text
+from .core.markup import inject_markup, MARKUP_WHITELIST_RE
 from .core.webapi import register_web_apis
 from .core.translator import Translator
 from .cosyvoice.client import CosyVoiceClient, CosyVoiceServerError, QueueFullError
@@ -615,7 +616,28 @@ class CosyVoicePlugin(Star):
     _BRACKET_RE = re.compile(r"[（(\[](.*?)[）)\]]", re.DOTALL)
 
     def _strip_brackets(self, text: str) -> str:
-        """移除所有被括号包裹的内容（含括号本身），用于不进入语音合成。"""
+        """移除所有被括号包裹的内容（含括号本身），用于不进入语音合成。
+
+        但需保留语音标记白名单（如 [laughter] [breath]），否则会被当成「不朗读括号」误删。
+        做法：先把白名单标记替换成占位符，剥离普通括号后再还原。
+        """
+        if not text:
+            return text
+        if MARKUP_WHITELIST_RE.search(text):
+            ph = {}
+            cnt = [0]
+
+            def _protect(m):
+                key = f"\x00COSY{cnt[0]}\x00"
+                cnt[0] += 1
+                ph[key] = m.group(0)
+                return key
+
+            tmp = MARKUP_WHITELIST_RE.sub(_protect, text)
+            tmp = self._BRACKET_RE.sub("", tmp)
+            for k, v in ph.items():
+                tmp = tmp.replace(k, v)
+            return tmp
         return self._BRACKET_RE.sub("", text)
 
     def _extract_brackets(self, text: str) -> str:
@@ -823,6 +845,8 @@ class CosyVoicePlugin(Star):
         # 实际合成的文本：audio_text 为译文（翻译命中时）或剥离括号的原文；
         # 空则无正文可念（纯括号），跳过合成
         synth_text = audio_text if audio_text is not None else display_text
+        vlang = self.engine.voice_language(voice)
+        synth_text = inject_markup(synth_text, vlang, self.config)
         if not synth_text.strip():
             logger.info("[cosyvoice] 正文仅含括号内容，跳过语音合成（括号内容已按模式单独发送）")
             self._mark_server_ok()
@@ -854,10 +878,12 @@ class CosyVoicePlugin(Star):
                     sent_any = False
                     for orig, trans in seg_items:
                         disp = trans if tmode == "translated" else (orig if bilingual else (f"{trans}\n中文：{orig}" if trans != orig else orig))
+                        # 仅语音文本注入标记（换气/音效）；展示文字 disp 不带标记
+                        trans_voiced = inject_markup(trans, vlang, self.config)
                         if text_after_voice:
                             # 先语音后文字：语音成功先发语音，再发对应文字；语音失败也补发文字（不丢）
-                            if trans.strip():
-                                wav = await self.engine.synthesize(trans, voice, pre_translated=True)
+                            if trans_voiced.strip():
+                                wav = await self.engine.synthesize(trans_voiced, voice, pre_translated=True)
                                 if wav:
                                     sent_any = True
                                     audio.schedule_cleanup(wav)
@@ -876,8 +902,8 @@ class CosyVoicePlugin(Star):
                             # 先文字后语音（原行为）
                             if not await self._realtime_send(event, [Comp.Plain(disp)]):
                                 logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
-                            if trans.strip():
-                                wav = await self.engine.synthesize(trans, voice, pre_translated=True)
+                            if trans_voiced.strip():
+                                wav = await self.engine.synthesize(trans_voiced, voice, pre_translated=True)
                                 if wav:
                                     sent_any = True
                                     audio.schedule_cleanup(wav)
@@ -904,6 +930,7 @@ class CosyVoicePlugin(Star):
                         sent_any = False
                         for seg in segs:
                             seg_audio = self._strip_brackets(seg) if self.config.get("skip_bracket_tts", True) else seg
+                            seg_audio = inject_markup(seg_audio, vlang, self.config)
                             if text_after_voice:
                                 # 先语音后文字：语音成功先发语音，再发对应文字；语音失败也补发文字（不丢）
                                 wav = await self.engine.synthesize(seg_audio, voice, pre_translated=True)
@@ -1085,6 +1112,7 @@ class CosyVoicePlugin(Star):
         orig_text = text
         if self.config.get("skip_bracket_tts", True):
             text = self._strip_brackets(text)
+            text = inject_markup(text, self.engine.voice_language(self._session_voice(event)), self.config)
             if not text.strip():
                 yield event.plain_result("括号里的内容我就不念啦～")
                 return
@@ -1404,10 +1432,11 @@ class CosyVoicePlugin(Star):
         text = clean_tts_text(text)
 
         target_voice = voice or self._session_voice(event)
+        tts_text = inject_markup(text.strip(), self.engine.voice_language(target_voice), self.config)
         merge = bool(self.config.get("segment_merge", False))
         try:
             if merge:
-                path = await self.engine.synthesize(text.strip(), target_voice)
+                path = await self.engine.synthesize(tts_text, target_voice)
                 if not path:
                     await self._realtime_send(event, [Comp.Plain("话到嘴边卡壳了，这次没念出来，待会儿再试试？")])
                     return "语音合成失败，已告知用户。"
@@ -1419,7 +1448,7 @@ class CosyVoicePlugin(Star):
             else:
                 # 不合并：边合成边逐段主动发送（每段独立一条消息，服务端返回一段即发一段）
                 sent = False
-                async for wav in self.engine.iter_segment_wavs(text.strip(), target_voice):
+                async for wav in self.engine.iter_segment_wavs(tts_text, target_voice):
                     sent = True
                     await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
                     audio.schedule_cleanup(wav)
