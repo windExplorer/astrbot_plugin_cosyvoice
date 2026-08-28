@@ -661,8 +661,35 @@ class CosyVoicePlugin(Star):
         # 从结果链移除原文（纯内存操作，很快、不阻塞）：voice_only 只后台发语音；
         # 不合并 both 由后台逐段发「文字段+语音段」，文字跟随语音走、不一次性刷全文。
         # 文字均已由 LLM completion_text 存入会话历史，不丢上下文；语音失败时 _fallback_text 兜底补发。
+        # —— 自动翻译：根据 translate_display_mode 决定聊天气泡文字，语音始终念译文 ——
+        # 语音始终念译文（自动翻译场景：原文用外语音色念不通顺），只有文字展示受模式控制。
+        display_text = full_text
+        audio_text = None
+        if self.translator is not None:
+            try:
+                vlang = self.engine.voice_language(voice)
+                translated = await self.translator.maybe_translate(full_text, target=vlang)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[cosyvoice] 翻译接入异常，回退原文: {e}")
+                translated = full_text
+            if translated and translated != full_text:
+                audio_text = translated
+                tmode = (cfg.get("translate_display_mode") or "both").strip().lower()
+                if tmode == "translated":
+                    display_text = translated
+                elif tmode == "original":
+                    display_text = full_text
+                else:  # both（默认）：原文（译文）
+                    display_text = f"{full_text}（{translated}）"
+
         if not text_in_chain:
             result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
+        else:
+            # 合并 both：结果链保留文字，改为按 translate_display_mode 展示
+            # （原文 / 译文 / 原文(译文)）
+            for c in result.chain:
+                if isinstance(c, Comp.Plain):
+                    c.text = display_text
 
         # 括号内容不朗读：从合成文本剥离括号内容；若当前文字不在结果链
         # （voice_only / 不合并 both），用户看不到括号内容，单独补发一条文字。
@@ -679,6 +706,9 @@ class CosyVoicePlugin(Star):
                         )
                     except Exception as e:  # noqa: BLE001
                         logger.warning(f"[cosyvoice] 括号内容单独发送失败: {e}")
+        # 未翻译时合成文本按括号剥离规则取原文；翻译命中时 audio_text 已是译文
+        if audio_text is None:
+            audio_text = speak_text
 
         logger.info(
             f"[cosyvoice] 语音转入后台合成 | 音色={voice_name} "
@@ -691,8 +721,8 @@ class CosyVoicePlugin(Star):
         # 这样「等一会儿」可接受，但绝不阻塞其他事件。
         task = asyncio.ensure_future(
             self._background_speak(
-                event, full_text, voice, send_mode, merge, origin, text_in_chain,
-                speak_text=speak_text,
+                event, display_text, voice, send_mode, merge, origin, text_in_chain,
+                audio_text=audio_text,
             )
         )
         # 避免「未等待的 Task 异常」警告刷屏
@@ -708,85 +738,68 @@ class CosyVoicePlugin(Star):
             logger.error(f"[cosyvoice] 后台语音任务异常: {exc}")
 
     async def _background_speak(
-        self, event: AstrMessageEvent, full_text: str,
+        self, event: AstrMessageEvent, display_text: str,
         voice, send_mode: str, merge: bool, origin: str, text_in_chain: bool = False,
-        speak_text: str | None = None,
+        audio_text: str | None = None,
     ):
         """后台补发语音：不阻塞 on_decorating_result。
 
         发送方式与文字归属：
-        - 合并 both：文字已在结果链（text_in_chain=True），只补发整条语音；
+        - 合并 both：文字已在结果链（text_in_chain=True，已为「原文(译文)」），只补发整条语音；
         - 合并 voice_only：文字已移除，只补发整条语音，失败回退补发文字；
-        - 不合并 both：文字已移除，逐段发「文字段+语音段」，文字跟随语音走；
+        - 不合并 both：文字已移除，先整条发「原文(译文)」文字、再逐段发译文语音；
         - 不合并 voice_only：文字已移除，逐段只发语音，失败回退补发文字。
 
         失败则进入冷却 + 回退文字（见 _enter_cooldown）；冷却期内不再打服务端。
         """
-        # 实际合成的文本（已剥离括号内容）；空则无正文可念（纯括号），跳过合成
-        synth_text = speak_text if speak_text is not None else full_text
+        # 实际合成的文本：audio_text 为译文（翻译命中时）或剥离括号的原文；
+        # 空则无正文可念（纯括号），跳过合成
+        synth_text = audio_text if audio_text is not None else display_text
         if not synth_text.strip():
             logger.info("[cosyvoice] 正文仅含括号内容，跳过语音合成（括号内容已按模式单独发送）")
             self._mark_server_ok()
-            self._decorated.setdefault(origin, set()).add(full_text)
+            self._decorated.setdefault(origin, set()).add(display_text)
             return
         logger.info(
             f"[cosyvoice] 后台合成开始 | send_mode={send_mode} merge={merge} "
-            f"text_in_chain={text_in_chain} 文本长度={len(full_text)}字"
+            f"text_in_chain={text_in_chain} 文本长度={len(display_text)}字"
         )
         try:
             if merge:
-                path = await self.engine.synthesize(synth_text, voice)
+                path = await self.engine.synthesize(synth_text, voice, pre_translated=True)
                 if not path:
                     logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
                     await self._enter_cooldown(
-                        event, send_mode, full_text, text_in_chain=text_in_chain
+                        event, send_mode, display_text, text_in_chain=text_in_chain
                     )
                     return
                 audio.schedule_cleanup(path)
                 await self._realtime_send(event, [Comp.Record(file=path, url=path)])
             else:
                 if send_mode == "both":
-                    # 逐段先发文字、再发语音（分两条单组件消息）：
-                    # 文字跟随语音分段走、不一次性刷全文；单组件消息平台兼容性最好，
-                    # 避免「组合消息被平台只展示语音、文字静默丢弃」。
-                    success = 0
-                    pending: list = []  # 合成失败的段：语音缺段但文字要补发
-                    async for seg_text, wav in self.engine.iter_segment_items(synth_text, voice):
-                        if wav:
-                            success += 1
-                            audio.schedule_cleanup(wav)
-                        else:
-                            logger.warning(
-                                f"[cosyvoice] 段合成失败（仅补发文字）: \"{seg_text[:20]}...\""
-                            )
-                            pending.append(seg_text)
-                            continue
-                        if not await self._realtime_send(event, [Comp.Plain(seg_text)]):
-                            logger.warning(
-                                f"[cosyvoice] 段文字发送失败（语音仍尝试）: \"{seg_text[:20]}...\""
-                            )
-                        if not await self._realtime_send(
-                            event, [Comp.Record(file=wav, url=wav)]
-                        ):
-                            logger.warning("[cosyvoice] 段语音发送失败（文字已发出）")
-                    if success == 0:
+                    # 先整条发「原文(译文)」文字，再逐段发译文语音（语音已为译文，
+                    # 不再逐段发译文文字、避免重复）；单组件消息平台兼容性最好。
+                    if not await self._realtime_send(event, [Comp.Plain(display_text)]):
+                        logger.warning("[cosyvoice] 整条文字发送失败（语音仍尝试）")
+                    sent_any = False
+                    async for wav in self.engine.iter_segment_wavs(synth_text, voice, pre_translated=True):
+                        sent_any = True
+                        audio.schedule_cleanup(wav)
+                        try:
+                            await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
+                    if not sent_any:
                         # 全部段合成失败：进冷却，由回退逻辑补发完整文字
                         logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
                         await self._enter_cooldown(
-                            event, send_mode, full_text, text_in_chain=text_in_chain
+                            event, send_mode, display_text, text_in_chain=text_in_chain
                         )
                         return
-                    if pending:
-                        # 部分段合成失败：把失败段的文字补发，保证文字完整不缺段
-                        for seg in pending:
-                            if not await self._realtime_send(event, [Comp.Plain(seg)]):
-                                logger.warning(
-                                    f"[cosyvoice] 补发失败段文字失败: \"{seg[:20]}...\""
-                                )
                 else:
                     # voice_only：只发语音段，文字由 LLM completion_text 存会话历史兜底
                     sent_any = False
-                    async for wav in self.engine.iter_segment_wavs(synth_text, voice):
+                    async for wav in self.engine.iter_segment_wavs(synth_text, voice, pre_translated=True):
                         sent_any = True
                         rec = Comp.Record(file=wav, url=wav)
                         audio.schedule_cleanup(wav)
@@ -798,12 +811,12 @@ class CosyVoicePlugin(Star):
                     if not sent_any:
                         logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
                         await self._enter_cooldown(
-                            event, send_mode, full_text, text_in_chain=text_in_chain
+                            event, send_mode, display_text, text_in_chain=text_in_chain
                         )
                         return
             # 整轮成功后才登记幂等 + 解除冷却
             self._mark_server_ok()
-            self._decorated.setdefault(origin, set()).add(full_text)
+            self._decorated.setdefault(origin, set()).add(display_text)
             bucket = self._decorated.get(origin)
             if bucket and len(bucket) > 20:
                 self._decorated[origin] = set(list(bucket)[-20:])
@@ -813,17 +826,17 @@ class CosyVoicePlugin(Star):
             # 排队过长：服务端在线但繁忙，进冷却避免反复打繁忙服务器，提示稍后再试
             logger.warning("[cosyvoice] 语音服务器繁忙（排队过长），进入冷却并回退文字")
             await self._enter_cooldown(
-                event, send_mode, full_text, tip=SERVER_BUSY_TIP, text_in_chain=text_in_chain
+                event, send_mode, display_text, tip=SERVER_BUSY_TIP, text_in_chain=text_in_chain
             )
         except CosyVoiceServerError:
             logger.warning("[cosyvoice] 语音服务器失联，进入冷却并回退文字")
             await self._enter_cooldown(
-                event, send_mode, full_text, text_in_chain=text_in_chain
+                event, send_mode, display_text, text_in_chain=text_in_chain
             )
         except Exception as e:
             logger.warning(f"[cosyvoice] 后台语音合成失败（进入冷却并回退文字）: {e}")
             await self._enter_cooldown(
-                event, send_mode, full_text, text_in_chain=text_in_chain
+                event, send_mode, display_text, text_in_chain=text_in_chain
             )
 
     async def _fallback_text(

@@ -500,7 +500,14 @@ class TtsEngine:
             logger.warning(f"[cosyvoice] 翻译接入异常，回退原文: {e}")
             return text
 
-    async def synthesize(self, text: str, voice_name: str | None = None) -> str | None:
+    def voice_language(self, voice_name: str | None = None) -> str | None:
+        """返回所选音色的语种（用于翻译目标语种判定），无可用音色返回 None。"""
+        name, _, _ = self.resolve_voice(voice_name)
+        if name is None:
+            return None
+        return (self.voices.get(name) or {}).get("language") or None
+
+    async def synthesize(self, text: str, voice_name: str | None = None, *, pre_translated: bool = False) -> str | None:
         """合成文本并返回 wav 文件路径；无可用音色或失败返回 None。"""
         name, prompt_wav, prompt_text = self.resolve_voice(voice_name)
         if name is None:
@@ -511,7 +518,8 @@ class TtsEngine:
             return None
         # 先按音色语种翻译（中文文本 + 外语音色 → 翻成该语种），再分段合成
         vlang = (self.voices.get(name) or {}).get("language") or None
-        text = await self._maybe_translate(text, voice_lang=vlang)
+        if not pre_translated:
+            text = await self._maybe_translate(text, voice_lang=vlang)
 
         chunks = [c for c in self.split_text(text) if is_speakable(c)]
         if not chunks:
@@ -554,7 +562,7 @@ class TtsEngine:
             logger.error(f"[cosyvoice] 语音合成失败: {e}")
             return None
 
-    async def iter_segment_items(self, text: str, voice_name: str | None = None):
+    async def iter_segment_items(self, text: str, voice_name: str | None = None, *, pre_translated: bool = False):
         """逐段合成，依次 yield (段文字, wav路径或None)。
 
         用于「不合并」模式：每段生成完即可发给用户，无需等全部完成。
@@ -572,7 +580,8 @@ class TtsEngine:
             return
         # 不合并模式同样先按音色语种翻译，再分段合成（保证逐段发送也是译后文本）
         vlang = (self.voices.get(name) or {}).get("language") or None
-        text = await self._maybe_translate(text, voice_lang=vlang)
+        if not pre_translated:
+            text = await self._maybe_translate(text, voice_lang=vlang)
         chunks = [c for c in self.split_text(text) if is_speakable(c)]
         if not chunks:
             logger.debug("[cosyvoice] 无有效可合成文本，跳过语音合成")
@@ -608,11 +617,11 @@ class TtsEngine:
             else:
                 yield ch, None
 
-    async def iter_segment_wavs(self, text: str, voice_name: str | None = None):
+    async def iter_segment_wavs(self, text: str, voice_name: str | None = None, *, pre_translated: bool = False):
         """逐段合成，依次 yield 每段生成的临时 wav 文件路径（忽略失败段）。
 
         用于「不合并」模式下只需语音、无需逐段文字的路径（voice_only / 手动指令）。
         """
-        async for _ch, wav in self.iter_segment_items(text, voice_name):
+        async for _ch, wav in self.iter_segment_items(text, voice_name, pre_translated=pre_translated):
             if wav:
                 yield wav
