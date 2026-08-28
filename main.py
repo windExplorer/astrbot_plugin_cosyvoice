@@ -679,14 +679,14 @@ class CosyVoicePlugin(Star):
                     display_text = translated
                 elif tmode == "original":
                     display_text = full_text
-                else:  # both（默认）：原文（译文）
-                    display_text = f"{full_text}（{translated}）"
+                else:  # both（默认）：优先译文，空一行后 原文：xxx
+                    display_text = f"{translated}\n\n原文：{full_text}"
 
         if not text_in_chain:
             result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
         else:
             # 合并 both：结果链保留文字，改为按 translate_display_mode 展示
-            # （原文 / 译文 / 原文(译文)）
+            # （原文 / 译文 / 译文+空行+原文：）
             for c in result.chain:
                 if isinstance(c, Comp.Plain):
                     c.text = display_text
@@ -745,9 +745,9 @@ class CosyVoicePlugin(Star):
         """后台补发语音：不阻塞 on_decorating_result。
 
         发送方式与文字归属：
-        - 合并 both：文字已在结果链（text_in_chain=True，已为「原文(译文)」），只补发整条语音；
+        - 合并 both：文字已在结果链（text_in_chain=True，已为「译文+空行+原文：」），只补发整条语音；
         - 合并 voice_only：文字已移除，只补发整条语音，失败回退补发文字；
-        - 不合并 both：文字已移除，先整条发「原文(译文)」文字、再逐段发译文语音；
+        - 不合并 both：文字已移除，先整条发「译文+空行+原文：」文字、再逐段发译文语音；
         - 不合并 voice_only：文字已移除，逐段只发语音，失败回退补发文字。
 
         失败则进入冷却 + 回退文字（见 _enter_cooldown）；冷却期内不再打服务端。
@@ -777,7 +777,7 @@ class CosyVoicePlugin(Star):
                 await self._realtime_send(event, [Comp.Record(file=path, url=path)])
             else:
                 if send_mode == "both":
-                    # 先整条发「原文(译文)」文字，再逐段发译文语音（语音已为译文，
+                    # 先整条发「译文+空行+原文：」文字，再逐段发译文语音（语音已为译文，
                     # 不再逐段发译文文字、避免重复）；单组件消息平台兼容性最好。
                     if not await self._realtime_send(event, [Comp.Plain(display_text)]):
                         logger.warning("[cosyvoice] 整条文字发送失败（语音仍尝试）")

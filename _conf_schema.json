@@ -160,7 +160,7 @@
     "title": "翻译后文字展示方式",
     "description": "自动翻译（外语音色）场景下，聊天气泡里显示的文字",
     "options": ["both", "original", "translated"],
-    "hint": "both=原文+译文（如「你好（こんにちは）」，默认）；original=只显示原文；translated=只显示译文。无论哪种，语音都始终念译文（原文用外语音色念不通顺）。未配置翻译适配器时不生效。",
+    "hint": "both=优先显示译文，空一行后 原文：xxx，默认；original=只显示原文；translated=只显示译文。无论哪种，语音都始终念译文。未配置翻译适配器时不生效。",
     "default": "both"
   },
   "tts_scope": {
