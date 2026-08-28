@@ -45,14 +45,34 @@ _CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
 _FOREIGN_RE = re.compile(r"[A-Za-z0-9぀-ヿ가-힯]")
 
 
+# 非拉丁外文字（假名/谚文/西里尔/泰文等）：出现即说明存在「外文原文」，不受字母数量限制
+_FOREIGN_SCRIPT_RE = re.compile(r"[぀-ヿ가-힯Ѐ-ӿ฀-๿]")
+_LATIN_RE = re.compile(r"[A-Za-z]")
+# 仅含拉丁字母/数字时，需要至少这么多拉丁字母才算双语：
+# 避免中文回复里夹带 OK / WiFi / 数字（如「7 点」）被误判为双语
+# （一旦误判会跳过翻译、把中文剥离后只念那几个字母）
+_BILINGUAL_MIN_LATIN = 15
+
+
 def _strip_chinese(text: str) -> str:
     """去除文本中的汉字，保留外文、数字与标点（双语回复时只朗读外文）。"""
     return _CJK_RE.sub("", text)
 
 
 def _is_bilingual(text: str) -> bool:
-    """是否同时含汉字与外语文字（即「外文 + 中文翻译」双语）。"""
-    return bool(_CJK_RE.search(text) and _FOREIGN_RE.search(text))
+    """是否为「外文原文 + 中文翻译」双语回复。
+
+    判定需要「含汉字」且「外文成分足够」：
+    - 含假名/谚文/西里尔/泰文等非拉丁外文字 → 直接算（日/韩/俄等原文）；
+    - 否则（只有拉丁字母/数字）要求拉丁字母达到一定数量，
+      避免把中文回复里夹杂的 OK / WiFi / 数字（如「7 点」）误判成双语——
+      误判会跳过翻译、把中文剥离后只念出那几个字母。
+    """
+    if not (_CJK_RE.search(text or "") and _FOREIGN_RE.search(text or "")):
+        return False
+    if _FOREIGN_SCRIPT_RE.search(text):
+        return True
+    return len(_LATIN_RE.findall(text)) >= _BILINGUAL_MIN_LATIN
 
 
 def _has_foreign(text: str) -> bool:
@@ -785,6 +805,10 @@ class CosyVoicePlugin(Star):
                     if translated and translated != full_text:
                         audio_text = translated
                         display_text = translated if tmode == "translated" else f"{translated}\n中文：{full_text}"
+                        # 单段译文也要走逐段发送分支：否则会把 display_text（译文+换行+中文：原文）
+                        # 再按换行二次切分，导致文字被拆成两条、语音重复发送。
+                        # 逐段分支的行为：语音=译文+副语言标签；文字=译文 + 换行 + 中文：原文（一条发出）。
+                        seg_items = [(full_text, translated)]
 
         if not text_in_chain:
             result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
