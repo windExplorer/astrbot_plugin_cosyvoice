@@ -54,6 +54,15 @@ def _is_bilingual(text: str) -> bool:
     """是否同时含汉字与外语文字（即「外文 + 中文翻译」双语）。"""
     return bool(_CJK_RE.search(text) and _FOREIGN_RE.search(text))
 
+
+def _has_foreign(text: str) -> bool:
+    """文本去除中文后是否仍含可朗读的外文（假名/字母/数字/谚文）。
+
+    用于判断某段是否值得发声：双语回复里纯中文段去中文后只剩标点/emoji，
+    不算「有外文」，应只发文字、不合成语音（避免把 :，~ 🎵 这类残留当噪音念出）。
+    """
+    return bool(_FOREIGN_RE.search(text or ""))
+
 # 语音服务器连不上时统一给用户的提示（大模型也需要能看懂这是服务器故障）。
 # 提示均为「独立发送」的消息（主动推送 / 指令结果 / 工具补发），前面无正文，
 # 不再加前导换行，避免消息开头出现空白行。
@@ -736,11 +745,10 @@ class CosyVoicePlugin(Star):
                 # 不做翻译（避免中文音色把外文翻成中文念出来，也避免整段把中文念出来）。
                 audio_text = _strip_chinese(full_text)
                 segs = self.engine.split_text(full_text)
-                if len(segs) > 1:
-                    # 多段：每段语音文本取「去中文后的外文」；纯中文段 trans 为空，发送时只发文字不发声
-                    seg_items = [(seg, _strip_chinese(seg)) for seg in segs]
-                    display_text = full_text
-                # 单行：display_text 保持 full_text；audio_text 已为去中文外文
+                # 多段/单段都走逐段发送：每段语音取「去中文后的外文」；纯中文段（去中文后无外文）
+                # 发送时跳过语音、只发文字（见 _background_speak 的 _has_foreign 判断）。
+                seg_items = [(seg, _strip_chinese(seg)) for seg in segs]
+                display_text = full_text
             elif tmode == "original":
                 # 只显示原文：不翻译，分段留给语音侧按 segment_punct 处理
                 pass
@@ -882,7 +890,7 @@ class CosyVoicePlugin(Star):
                         trans_voiced = inject_markup(trans, vlang, self.config)
                         if text_after_voice:
                             # 先语音后文字：语音成功先发语音，再发对应文字；语音失败也补发文字（不丢）
-                            if trans_voiced.strip():
+                            if _has_foreign(trans):
                                 wav = await self.engine.synthesize(trans_voiced, voice, pre_translated=True)
                                 if wav:
                                     sent_any = True
@@ -902,7 +910,7 @@ class CosyVoicePlugin(Star):
                             # 先文字后语音（原行为）
                             if not await self._realtime_send(event, [Comp.Plain(disp)]):
                                 logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
-                            if trans_voiced.strip():
+                            if _has_foreign(trans):
                                 wav = await self.engine.synthesize(trans_voiced, voice, pre_translated=True)
                                 if wav:
                                     sent_any = True
@@ -923,13 +931,18 @@ class CosyVoicePlugin(Star):
                         return
                 elif send_mode == "both":
                     # 未走翻译多段分支时（没开翻译 / original 模式 / 单行翻译）：
-                    # 文字也按「换行+句末标点」分段逐段发送，与语音逐段对齐——
-                    # 避免「有换行的文字只语音分段、文字却整块刷出」的不一致。
+                    # 文字按「换行+句末标点」分段逐段发送，与语音逐段对齐。
+                    # 语音文本优先用 audio_text（译文/去中文外文），避免把中文翻译也念出来；
+                    # 仅 original 模式（audio_text=None）时语音才与 display_text 一致。
                     segs = self.engine.split_text(display_text)
-                    if len(segs) > 1:
+                    vsegs = self.engine.split_text(audio_text) if audio_text is not None else segs
+                    if len(segs) > 1 or len(vsegs) > 1:
                         sent_any = False
-                        for seg in segs:
-                            seg_audio = self._strip_brackets(seg) if self.config.get("skip_bracket_tts", True) else seg
+                        for i, seg in enumerate(segs):
+                            vseg = vsegs[min(i, len(vsegs) - 1)] if vsegs else seg
+                            seg_audio = self._strip_brackets(vseg) if self.config.get("skip_bracket_tts", True) else vseg
+                            if bilingual:
+                                seg_audio = _strip_chinese(seg_audio)
                             seg_audio = inject_markup(seg_audio, vlang, self.config)
                             if text_after_voice:
                                 # 先语音后文字：语音成功先发语音，再发对应文字；语音失败也补发文字（不丢）
@@ -994,6 +1007,9 @@ class CosyVoicePlugin(Star):
                     if seg_items:
                         sent_any = False
                         for orig, trans in seg_items:
+                            if not _has_foreign(trans):
+                                # 纯中文段（去中文后无外文）：voice_only 也不发声
+                                continue
                             wav = await self.engine.synthesize(trans, voice, pre_translated=True)
                             if wav:
                                 sent_any = True
