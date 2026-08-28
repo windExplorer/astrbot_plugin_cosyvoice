@@ -837,10 +837,12 @@ class CosyVoicePlugin(Star):
                 if isinstance(c, Comp.Plain):
                     c.text = display_text
 
-        # 括号内容不朗读：仅从「语音合成文本」剥离括号内容，文字照常显示（含括号），不单独补发。
-        # 聊天气泡里仍是完整原文（带括号），但语音不会把括号内容念出来——既满足「括号不朗读」，
-        # 又避免单独补发括号文字导致与完整消息重复出现。
+        # 括号内容不朗读：仅从「语音合成文本」剥离括号内容。
+        # - 合并模式：文字留在结果链（含括号），语音不念，不单独补发；
+        # - 逐段模式：分段改在「剥离括号后的文本」上做，括号内容单独补发一条文字消息，
+        #   避免括号内的句末标点把句子切断、造成文字出现半截句且语音/文字段数错位。
         speak_text = full_text
+        bracket_text = ""
         if cfg.get("skip_bracket_tts", True):
             bracket_text = self._extract_brackets(full_text)
             if bracket_text:
@@ -862,6 +864,7 @@ class CosyVoicePlugin(Star):
             self._background_speak(
                 event, display_text, voice, send_mode, merge, origin, text_in_chain,
                 audio_text=audio_text, seg_items=seg_items, bilingual=bilingual,
+                bracket_text=bracket_text,
             )
         )
         # 避免「未等待的 Task 异常」警告刷屏
@@ -880,7 +883,7 @@ class CosyVoicePlugin(Star):
         self, event: AstrMessageEvent, display_text: str,
         voice, send_mode: str, merge: bool, origin: str, text_in_chain: bool = False,
         audio_text: str | None = None, seg_items: list | None = None,
-        bilingual: bool = False,
+        bilingual: bool = False, bracket_text: str = "",
     ):
         """后台补发语音：不阻塞 on_decorating_result。
 
@@ -889,6 +892,10 @@ class CosyVoicePlugin(Star):
         - 合并 voice_only：文字已移除，只补发整条语音，失败回退补发文字；
         - 不合并 both：文字已移除，先整条发「译文+换行+原文：」文字、再逐段发译文语音；
         - 不合并 voice_only：文字已移除，逐段只发语音，失败回退补发文字。
+
+        bracket_text：skip_bracket_tts 生效时从原文提取的括号内容。逐段模式下分段是在
+        「剥离括号后的文本」上做的，故正文任意一段都不含括号，括号内容在正文各段发完后
+        单独补发一条文字消息（合并模式不使用——那里文字保留在结果链里、含括号）。
 
         失败则进入冷却 + 回退文字（见 _enter_cooldown）；冷却期内不再打服务端。
         """
@@ -976,13 +983,27 @@ class CosyVoicePlugin(Star):
                     # 文字按「换行+句末标点」分段逐段发送，与语音逐段对齐。
                     # 语音文本优先用 audio_text（译文/去中文外文），避免把中文翻译也念出来；
                     # 仅 original 模式（audio_text=None）时语音才与 display_text 一致。
-                    segs = self.engine.split_text(display_text)
+                    # 分段源是「剥离括号后的文本」base_text，而非含括号的 display_text：
+                    # 括号内容常含句末标点（如「（笑。）」），若在原文上分段会把句子从括号处
+                    # 切断，既让文字出现半截句，又造成文字段与语音段数量错位。
+                    # 剥离后分段，括号内容改由 bracket_text 单独补发一条文字消息。
+                    skip_bracket = bool(self.config.get("skip_bracket_tts", True))
+                    base_text = self._strip_brackets(display_text) if skip_bracket else display_text
+                    segs = self.engine.split_text(base_text)
                     vsegs = self.engine.split_text(audio_text) if audio_text is not None else segs
                     if len(segs) > 1 or len(vsegs) > 1:
                         sent_any = False
                         for i, seg in enumerate(segs):
-                            vseg = vsegs[min(i, len(vsegs) - 1)] if vsegs else seg
-                            seg_audio = self._strip_brackets(vseg) if self.config.get("skip_bracket_tts", True) else vseg
+                            # 语音段取用：仅当译文分段与文字分段【数量一致】时才逐段对齐取译文。
+                            # 段数不一致时（译文与原文分段天然不同），若用 vsegs[min(i, len-1)]
+                            # 映射，越界的段会复用最后一段语音，表现为「后面的段落重复念前面那段」。
+                            # 故不一致时退回用当前文字段，保证每段念的都是自己的内容。
+                            if vsegs and len(vsegs) == len(segs):
+                                vseg = vsegs[i]
+                            else:
+                                vseg = seg
+                            # base_text / vseg 在 skip_bracket 时均已剥离括号，无需二次剥离
+                            seg_audio = vseg
                             if bilingual:
                                 seg_audio = _strip_chinese(seg_audio)
                             seg_audio = inject_markup(seg_audio, vlang, self.config)
@@ -1024,7 +1045,7 @@ class CosyVoicePlugin(Star):
                         # 单行（无换行/句末标点分段）：按 text_after_voice 决定文字与语音先后
                         if not text_after_voice:
                             # 先文字后语音（原行为，单组件消息平台兼容）
-                            if not await self._realtime_send(event, [Comp.Plain(display_text)]):
+                            if not await self._realtime_send(event, [Comp.Plain(base_text)]):
                                 logger.warning("[cosyvoice] 整条文字发送失败（语音仍尝试）")
                         sent_any = False
                         async for wav in self.engine.iter_segment_wavs(synth_text, voice, pre_translated=True):
@@ -1042,8 +1063,13 @@ class CosyVoicePlugin(Star):
                             return
                         if text_after_voice:
                             # 语音已发，再补发整条文字（先听后读）
-                            if not await self._realtime_send(event, [Comp.Plain(display_text)]):
+                            if not await self._realtime_send(event, [Comp.Plain(base_text)]):
                                 logger.warning("[cosyvoice] 整条文字发送失败（已尝试补发）")
+                    # 括号内容单独补发一条文字：正文各段（含单行）都取自剥离括号后的
+                    # base_text，不含任何括号内容，故此处补发不会与正文重复。
+                    if bracket_text:
+                        if not await self._realtime_send(event, [Comp.Plain(bracket_text)]):
+                            logger.warning("[cosyvoice] 括号内容补发失败（不重试，避免刷屏）")
                 else:
                     # voice_only：只发语音段，文字由 LLM completion_text 存会话历史兜底
                     if seg_items:
