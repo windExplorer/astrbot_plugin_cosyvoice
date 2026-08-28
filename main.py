@@ -665,28 +665,47 @@ class CosyVoicePlugin(Star):
         # 语音始终念译文（自动翻译场景：原文用外语音色念不通顺），只有文字展示受模式控制。
         display_text = full_text
         audio_text = None
+        seg_items = None  # 翻译多段时：(原文段, 译文段) 列表，供不合并模式逐段发送
         if self.translator is not None:
-            try:
-                vlang = self.engine.voice_language(voice)
-                translated = await self.translator.maybe_translate(full_text, target=vlang)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"[cosyvoice] 翻译接入异常，回退原文: {e}")
-                translated = full_text
-            if translated and translated != full_text:
-                audio_text = translated
-                tmode = (cfg.get("translate_display_mode") or "both").strip().lower()
-                if tmode == "translated":
-                    display_text = translated
-                elif tmode == "original":
-                    display_text = full_text
-                else:  # both（默认）：优先译文，空一行后 原文：xxx
-                    display_text = f"{translated}\n\n原文：{full_text}"
+            vlang = self.engine.voice_language(voice)
+            tmode = (cfg.get("translate_display_mode") or "both").strip().lower()
+            if tmode == "original":
+                # 只显示原文：不翻译，分段留给语音侧按 segment_punct 处理
+                pass
+            else:
+                # 按「换行 + 句末标点」切原文，逐段单独翻译（每段是完整语义单元，翻译更准）
+                segs = self.engine.split_text(full_text)
+                if len(segs) > 1:
+                    pairs = []
+                    for seg in segs:
+                        try:
+                            t = await self.translator.maybe_translate(seg, target=vlang)
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning(f"[cosyvoice] 分段翻译异常，回退该段原文: {e}")
+                            t = seg
+                        pairs.append((seg, t))
+                    audio_text = "\n".join(t for _, t in pairs)
+                    if tmode == "translated":
+                        display_text = audio_text
+                    else:  # both：译文直接换行接「原文：xxx」（不加空行）
+                        display_text = "\n".join(f"{t}\n原文：{o}" for o, t in pairs)
+                    seg_items = pairs
+                else:
+                    # 单行无多段：整块翻译（保持原行为，避免无谓的逐段调用）
+                    try:
+                        translated = await self.translator.maybe_translate(full_text, target=vlang)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"[cosyvoice] 翻译接入异常，回退原文: {e}")
+                        translated = full_text
+                    if translated and translated != full_text:
+                        audio_text = translated
+                        display_text = translated if tmode == "translated" else f"{translated}\n原文：{full_text}"
 
         if not text_in_chain:
             result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
         else:
             # 合并 both：结果链保留文字，改为按 translate_display_mode 展示
-            # （原文 / 译文 / 译文+空行+原文：）
+            # （原文 / 译文 / 译文+换行+原文：）
             for c in result.chain:
                 if isinstance(c, Comp.Plain):
                     c.text = display_text
@@ -722,7 +741,7 @@ class CosyVoicePlugin(Star):
         task = asyncio.ensure_future(
             self._background_speak(
                 event, display_text, voice, send_mode, merge, origin, text_in_chain,
-                audio_text=audio_text,
+                audio_text=audio_text, seg_items=seg_items,
             )
         )
         # 避免「未等待的 Task 异常」警告刷屏
@@ -740,14 +759,14 @@ class CosyVoicePlugin(Star):
     async def _background_speak(
         self, event: AstrMessageEvent, display_text: str,
         voice, send_mode: str, merge: bool, origin: str, text_in_chain: bool = False,
-        audio_text: str | None = None,
+        audio_text: str | None = None, seg_items: list | None = None,
     ):
         """后台补发语音：不阻塞 on_decorating_result。
 
         发送方式与文字归属：
-        - 合并 both：文字已在结果链（text_in_chain=True，已为「译文+空行+原文：」），只补发整条语音；
+        - 合并 both：文字已在结果链（text_in_chain=True，已为「译文+换行+原文：」），只补发整条语音；
         - 合并 voice_only：文字已移除，只补发整条语音，失败回退补发文字；
-        - 不合并 both：文字已移除，先整条发「译文+空行+原文：」文字、再逐段发译文语音；
+        - 不合并 both：文字已移除，先整条发「译文+换行+原文：」文字、再逐段发译文语音；
         - 不合并 voice_only：文字已移除，逐段只发语音，失败回退补发文字。
 
         失败则进入冷却 + 回退文字（见 _enter_cooldown）；冷却期内不再打服务端。
@@ -776,9 +795,33 @@ class CosyVoicePlugin(Star):
                 audio.schedule_cleanup(path)
                 await self._realtime_send(event, [Comp.Record(file=path, url=path)])
             else:
-                if send_mode == "both":
-                    # 先整条发「译文+空行+原文：」文字，再逐段发译文语音（语音已为译文，
-                    # 不再逐段发译文文字、避免重复）；单组件消息平台兼容性最好。
+                if send_mode == "both" and seg_items:
+                    # 翻译多段：逐段发送——每段「译文直接换行接原文：xxx」文字 + 对应段译文语音，
+                    # 文本随语音分段、且原文/译文一一对应（分段在原文侧，语义对齐可靠）
+                    tmode = (self.config.get("translate_display_mode") or "both").strip().lower()
+                    sent_any = False
+                    for orig, trans in seg_items:
+                        disp = trans if tmode == "translated" else f"{trans}\n原文：{orig}"
+                        if not await self._realtime_send(event, [Comp.Plain(disp)]):
+                            logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
+                        wav = await self.engine.synthesize(trans, voice, pre_translated=True)
+                        if wav:
+                            sent_any = True
+                            audio.schedule_cleanup(wav)
+                            try:
+                                await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
+                            except Exception as e:  # noqa: BLE001
+                                logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
+                        else:
+                            logger.warning("[cosyvoice] 分段语音合成失败（跳过该段）")
+                    if not sent_any:
+                        logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
+                        await self._enter_cooldown(
+                            event, send_mode, display_text, text_in_chain=text_in_chain
+                        )
+                        return
+                elif send_mode == "both":
+                    # 原逻辑：先整条发文字，再逐段发译文语音（单组件消息平台兼容性最好）
                     if not await self._realtime_send(event, [Comp.Plain(display_text)]):
                         logger.warning("[cosyvoice] 整条文字发送失败（语音仍尝试）")
                     sent_any = False
@@ -790,7 +833,6 @@ class CosyVoicePlugin(Star):
                         except Exception as e:  # noqa: BLE001
                             logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
                     if not sent_any:
-                        # 全部段合成失败：进冷却，由回退逻辑补发完整文字
                         logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
                         await self._enter_cooldown(
                             event, send_mode, display_text, text_in_chain=text_in_chain
@@ -798,22 +840,40 @@ class CosyVoicePlugin(Star):
                         return
                 else:
                     # voice_only：只发语音段，文字由 LLM completion_text 存会话历史兜底
-                    sent_any = False
-                    async for wav in self.engine.iter_segment_wavs(synth_text, voice, pre_translated=True):
-                        sent_any = True
-                        rec = Comp.Record(file=wav, url=wav)
-                        audio.schedule_cleanup(wav)
-                        try:
-                            await self._realtime_send(event, [rec])
-                        except Exception as e:  # noqa: BLE001
-                            # 单段发送失败只跳过该段，不影响后续段继续发出
-                            logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
-                    if not sent_any:
-                        logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
-                        await self._enter_cooldown(
-                            event, send_mode, display_text, text_in_chain=text_in_chain
-                        )
-                        return
+                    if seg_items:
+                        sent_any = False
+                        for orig, trans in seg_items:
+                            wav = await self.engine.synthesize(trans, voice, pre_translated=True)
+                            if wav:
+                                sent_any = True
+                                audio.schedule_cleanup(wav)
+                                try:
+                                    await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
+                                except Exception as e:  # noqa: BLE001
+                                    logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
+                        if not sent_any:
+                            logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
+                            await self._enter_cooldown(
+                                event, send_mode, display_text, text_in_chain=text_in_chain
+                            )
+                            return
+                    else:
+                        sent_any = False
+                        async for wav in self.engine.iter_segment_wavs(synth_text, voice, pre_translated=True):
+                            sent_any = True
+                            rec = Comp.Record(file=wav, url=wav)
+                            audio.schedule_cleanup(wav)
+                            try:
+                                await self._realtime_send(event, [rec])
+                            except Exception as e:  # noqa: BLE001
+                                # 单段发送失败只跳过该段，不影响后续段继续发出
+                                logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
+                        if not sent_any:
+                            logger.warning("[cosyvoice] 后台合成失败，进入冷却并回退文字")
+                            await self._enter_cooldown(
+                                event, send_mode, display_text, text_in_chain=text_in_chain
+                            )
+                            return
             # 整轮成功后才登记幂等 + 解除冷却
             self._mark_server_ok()
             self._decorated.setdefault(origin, set()).add(display_text)
