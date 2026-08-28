@@ -568,8 +568,8 @@ class CosyVoicePlugin(Star):
         """主动推送一条消息（文字段 / 语音段 / 组合），返回是否发送成功。
 
         发送顺序（取第一个可用且成功的）：
-        1) event.send：部分平台/版本支持的事件级主动发送；
-        2) self.context.send_message(unified_msg_origin, chain)：AstrBot 官方主动消息 API。
+        1) self.context.send_message(unified_msg_origin, chain)：AstrBot 官方主动消息 API（首选，真正投递）；
+        2) event.send：部分平台/版本支持的事件级主动发送（兜底，理由见注意③）。
 
         :return: True=发送成功；False=两条通道都失败（调用方可降级处理，如分开补发）。
         注意：① 这里不能调用 event.chain_result()——那会改写事件自身的结果链，
@@ -578,32 +578,34 @@ class CosyVoicePlugin(Star):
         直接传组件列表即可，事件自身结果保持不动。
         ② 部分平台对「主动推送的组合消息（Plain+Record）」可能只展示语音、
         静默丢弃文字，因此调用方应尽量用单组件消息（文字、语音分开发）。
+        ③ event.send 不能作为首选通道：它只是把消息并入事件结果链，而后台补发语音时
+        事件早已响应完成，该链不会再被发送；且它【不抛异常】，会打印「主动推送成功
+        (event.send)」却让用户什么也收不到。必须以 context.send_message 为首选。
         """
         types = [type(c).__name__ for c in records]
-        # 不再调用 event.chain_result()，避免篡改事件结果链（见上方说明 ①）
-        # 注意：event.send / context.send_message 需要 MessageChain 对象（内部访问 .chain），
-        # 直接传裸 list 会报 "'list' object has no attribute 'chain'"，故统一包成 MessageChain。
+        # 统一包成 MessageChain：两条通道内部都会访问 .chain
         chain = MessageChain(list(records))
+        # 首选：官方主动消息 API，真正调用平台投递（见注意③）
         try:
-            send = getattr(event, "send", None)
-            if callable(send):
-                try:
-                    await send(chain)
-                    logger.info(f"[cosyvoice] 主动推送成功(event.send) 组件={types}")
-                    return True
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(
-                        f"[cosyvoice] event.send 实时发送失败（尝试 context.send_message）: {e}"
-                    )
             await self.context.send_message(event.unified_msg_origin, chain)
             logger.info(f"[cosyvoice] 主动推送成功(context.send_message) 组件={types}")
             return True
         except Exception as e:  # noqa: BLE001
-            logger.warning(
-                f"[cosyvoice] 主动推送失败（平台可能不支持主动消息）: {e}"
-                f" | 组件={types} | unified_msg_origin={event.unified_msg_origin}"
-            )
-            return False
+            logger.warning(f"[cosyvoice] context.send_message 失败（尝试 event.send）: {e}")
+        # 兜底：少数平台/版本仅支持事件级主动发送
+        try:
+            send = getattr(event, "send", None)
+            if callable(send):
+                await send(chain)
+                logger.info(f"[cosyvoice] 主动推送成功(event.send) 组件={types}")
+                return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[cosyvoice] event.send 也失败: {e} | 组件={types}")
+        logger.warning(
+            f"[cosyvoice] 主动推送失败（两条通道均不可用）| 组件={types}"
+            f" | unified_msg_origin={event.unified_msg_origin}"
+        )
+        return False
 
     # ---------- LLM 回复钩子：标记 + 关键词触发 ----------
     @filter.on_llm_response()

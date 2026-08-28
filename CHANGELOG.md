@@ -2,6 +2,14 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.1.20 (2026-08-29)
+
+- fix: 修复 v2.1.19 引入的回归——日志显示「主动推送成功(event.send)」，但语音/文字用户实际收不到。
+  - 根因：v2.1.19 把发送内容由裸 `list` 改为 `MessageChain` 后，`event.send` 不再抛 `'list' object has no attribute 'chain'`，于是走进 `event.send` 分支；而 `event.send` 只是把消息并入事件结果链，后台补发语音时事件早已响应完成，该链不会再被发送，且它**不抛异常**，于是日志一片「成功」、消息全部静默丢弃。
+  - 反直觉点：v2.1.17 传裸 `list` 时 `event.send` 报错，反而正确降级到 `context.send_message`（真正调用平台投递），语音才能送达；v2.1.19 补上 `MessageChain` 等于把这个「保护性报错」修掉，反而堵死了可靠通道。
+  - `_realtime_send` 通道优先级调整为：**`context.send_message`（首选，真正投递）→ `event.send`（兜底，失败如实告警）**，并把该坑写入 docstring 注意③，避免再次被调换回去。
+- 版本 v2.1.19 → v2.1.20。
+
 ## v2.1.19 (2026-08-28)
 
 - fix: 语音/文字发送报 `module 'astrbot.api.message_components' has no attribute 'MessageChain'`。
