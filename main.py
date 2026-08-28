@@ -1346,6 +1346,7 @@ class CosyVoicePlugin(Star):
             voice(string): 可选，指定音色名；留空则使用默认音色
         """
         self._refresh_cfg()
+        cfg = self.config
         if not self.config.get("enable_llm_tool", True):
             return "语音功能还没开呢，先把它打开我就能念啦～"
 

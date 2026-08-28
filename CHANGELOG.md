@@ -2,6 +2,10 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.1.10 (2026-08-28)
+
+- fix: `text_to_speech` 工具内使用 `self._effective_send_mode(event, cfg)` 但 `cfg` 未定义，触发 `NameError`，被兜底 except 误判为「语音合成失败」。已在函数开头 `self._refresh_cfg()` 后补 `cfg = self.config`。修复后艾特「来段语音」、`/tts_on` 等走该工具的语音可正常发出。
+
 ## v2.1.9 (2026-08-28)
 
 - fix: 单行（无换行/句末标点分段）语音路径也遵循 `text_after_voice`——true 时先发语音、再补发整条文字（先听后读）；false 恢复先文字后语音。v2.1.7 漏改此分支，导致短文本仍先文字后语音。
