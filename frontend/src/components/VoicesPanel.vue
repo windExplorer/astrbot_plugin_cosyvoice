@@ -89,6 +89,7 @@
                   <el-icon class="cv-star"><StarFilled /></el-icon>
                 </el-tooltip>
                 <el-tag v-if="v.hidden" size="small" type="warning" effect="plain">隐藏</el-tag>
+                <el-tag v-if="v.markup === false" size="small" type="info" effect="plain">无标记</el-tag>
               </div>
             </div>
             <div class="cv-voice-meta cv-muted">
@@ -152,6 +153,10 @@
           <el-switch v-model="editForm.hidden" />
           <span class="cv-muted" style="margin-left: 10px">隐藏后不出现在 /tts_voice 列表，但可手动指定</span>
         </el-form-item>
+        <el-form-item label="副语言标记">
+          <el-switch v-model="editForm.markup" />
+          <span class="cv-muted" style="margin-left: 10px">关闭后该音色不注入 [breath]/[laughter] 等标记，只念纯文本</span>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
@@ -190,7 +195,7 @@ const auditionText = ref('你好，这是一段音色试听。')
 
 const editVisible = ref(false)
 const isEdit = ref(false)
-const editForm = reactive({ name: '', prompt_wav: '', prompt_text: '', language: '', hidden: false })
+const editForm = reactive({ name: '', prompt_wav: '', prompt_text: '', language: '', hidden: false, markup: true })
 
 const isDark = computed(() => bridgeCtx && bridgeCtx.value && bridgeCtx.value.isDark)
 
@@ -251,6 +256,7 @@ async function load() {
       prompt_text: v.prompt_text || '',
       language: v.language || 'zh',
       hidden: !!v.hidden,
+      markup: v.markup !== false,
       is_default: !!v.is_default,
     }))
   } catch (e) {
@@ -299,7 +305,7 @@ async function setDefault(v) {
 
 function openCreate() {
   isEdit.value = false
-  Object.assign(editForm, { name: '', prompt_wav: '', prompt_text: '', language: '', hidden: false })
+  Object.assign(editForm, { name: '', prompt_wav: '', prompt_text: '', language: '', hidden: false, markup: true })
   editVisible.value = true
 }
 function openEdit(v) {
@@ -311,6 +317,7 @@ function openEdit(v) {
     prompt_text: full.prompt_text || '',
     language: full.language || '',
     hidden: !!full.hidden,
+    markup: full.markup !== false,
   })
   editVisible.value = true
 }
@@ -325,6 +332,7 @@ async function saveEdit() {
     prompt_text: editForm.prompt_text,
     language: editForm.language,
     hidden: editForm.hidden,
+    markup: editForm.markup,
   }
   try {
     if (isEdit.value) await bridge.apiPost('voices/update', payload)
