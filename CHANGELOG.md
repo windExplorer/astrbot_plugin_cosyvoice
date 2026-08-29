@@ -2,6 +2,14 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.1.28 (2026-08-30)
+
+- fix: 修复 v2.1.27 引入的回归——后台合成成功分支引用未定义变量 `full_text` 触发 `NameError`，被 `except Exception` 误判为「后台合成失败」，进而误进冷却、误补发文字；同时同一条回复仍被合成并推送两次。
+  - 根因1（崩溃）：v2.1.27 把幂等登记提前到「启动后台任务前」、键统一为 `full_text`，但 `_background_speak` 函数没有 `full_text` 参数，原成功登记处 `add(full_text)` 直接 `NameError`，被 1239 行 `except Exception` 捕获 → 进冷却 + 回退文字（日志里的「后台语音合成失败 name 'full_text' is not defined」）。
+  - 根因2（重复发送）：仅用 origin + `full_text` 去重不可靠——框架对同一消息重复触发 `on_decorating_result`（streaming / 工具循环 / 私聊 reaction 链路）时，两次触发间结果链已被改写（移除了 Plain），`full_text` 计算前后不一致，去重不命中，仍会起第二个后台任务。
+  - 修复：`_background_speak` 增加 `full_text` 参数（调用处同步传入），成功分支 `add(full_text)` 现在有效；额外加一层 `message_id` 级去重，重复触发时 `message_id` 稳定相同被直接拦截，而连续两条不同消息 `message_id` 不同、正常合成。任务完成回调统一清理该标记。
+- 版本 v2.1.27 → v2.1.28。
+
 ## v2.1.27 (2026-08-30)
 
 - fix: 修复同一条回复被重复合成并重复发送（日志里出现 6 次），以及 `[breath]` 等副语言标记被误当成「括号内容」单独补发成文字。

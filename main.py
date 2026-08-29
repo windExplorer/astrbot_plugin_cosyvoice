@@ -142,6 +142,10 @@ class CosyVoicePlugin(Star):
         # 本轮已合成的文本集合（origin -> {text}），防止 on_decorating_result 被框架
         # 重复触发时重复合成、重复打服务端导致服务端过载 / 误报失联。
         self._decorated: dict = {}
+        # 单条消息级去重（message_id）：on_decorating_result 在某些平台/链路会被框架对同一条
+        # 消息重复触发（streaming / 工具循环 / 私聊 reaction 链路），用 message_id 精确拦截重复，
+        # 不影响「同一会话的连续两条不同消息」（message_id 不同），比 origin 级去重更稳。
+        self._spoken_msgs: set = set()
         # 会话级语音开关（按群持久记忆）：unified_msg_origin -> True
         data_dir = self._data_dir()
         self._session_file = os.path.join(data_dir, "tts_sessions.json")
@@ -894,16 +898,23 @@ class CosyVoicePlugin(Star):
         #   同一条回复被合成并重复发送；② 键不一致（检查用 full_text、登记用 display_text），
         #   翻译/括号处理后二者不同，幂等永远不命中。提前用 full_text 登记，任何重复触发立即
         #   被上方 771 行拦截，从根本上杜绝重复发送。
+        # 额外再加一道 message_id 级去重：同一消息被框架重复触发时 message_id 稳定相同，
+        # 而 origin 级 full_text 去重可能因两次触发间结果链被改写（801 行移除 Plain）而失效。
+        mid = getattr(event, "message_id", None) or f"{origin}#{full_text}"
+        if mid in self._spoken_msgs:
+            return
         self._decorated.setdefault(origin, set()).add(full_text)
+        self._spoken_msgs.add(mid)
         task = asyncio.ensure_future(
             self._background_speak(
-                event, display_text, voice, send_mode, merge, origin, text_in_chain,
+                event, display_text, full_text, voice, send_mode, merge, origin, text_in_chain,
                 audio_text=audio_text, seg_items=seg_items, bilingual=bilingual,
                 bracket_text=bracket_text,
             )
         )
         # 避免「未等待的 Task 异常」警告刷屏
-        task.add_done_callback(self._log_task_exc)
+        # 任务结束（成功/失败/异常）统一清理该消息的去重标记，允许后续不同消息正常合成
+        task.add_done_callback(lambda t: (self._spoken_msgs.discard(mid), self._log_task_exc(t)))
         self._clear(event, clear_llm=True)
 
     def _log_task_exc(self, task):
@@ -915,7 +926,7 @@ class CosyVoicePlugin(Star):
             logger.error(f"[cosyvoice] 后台语音任务异常: {exc}")
 
     async def _background_speak(
-        self, event: AstrMessageEvent, display_text: str,
+        self, event: AstrMessageEvent, display_text: str, full_text: str,
         voice, send_mode: str, merge: bool, origin: str, text_in_chain: bool = False,
         audio_text: str | None = None, seg_items: list | None = None,
         bilingual: bool = False, bracket_text: str = "",
@@ -1217,7 +1228,8 @@ class CosyVoicePlugin(Star):
                                     f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
                                 )
                             return
-            # 整轮成功后才登记幂等 + 解除冷却（键统一为 full_text，与 771 行检查一致）
+            # 幂等登记已在启动后台任务前（897 行）用 full_text 完成，这里不再重复登记，
+            # 仅标记服务端恢复正常 + 解除冷却；_spoken_msgs 由任务回调统一清理。
             self._mark_server_ok()
             self._decorated.setdefault(origin, set()).add(full_text)
             bucket = self._decorated.get(origin)
