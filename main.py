@@ -142,6 +142,11 @@ class CosyVoicePlugin(Star):
         # 本轮已合成的文本集合（origin -> {text}），防止 on_decorating_result 被框架
         # 重复触发时重复合成、重复打服务端导致服务端过载 / 误报失联。
         self._decorated: dict = {}
+        # 防自触发循环：记录本插件主动推送出去的文字内容（context.send_message）。
+        # AStrBot 可能把机器人自己发出的消息再次路由回 on_decorating_result（event 的 origin 变为
+        # 机器人自身、与用户 origin 不同），令 message_id / origin 级去重失效，造成「合成→推送→再合成」
+        # 循环（每条回复念两遍）。用「最近推送过的文本」拦截这类二次触发，详见 on_decorating_result。
+        self._sent_spoken_texts: dict = {}
         # 单条消息级去重（message_id）：on_decorating_result 在某些平台/链路会被框架对同一条
         # 消息重复触发（streaming / 工具循环 / 私聊 reaction 链路），用 message_id 精确拦截重复，
         # 不影响「同一会话的连续两条不同消息」（message_id 不同），比 origin 级去重更稳。
@@ -589,10 +594,15 @@ class CosyVoicePlugin(Star):
         types = [type(c).__name__ for c in records]
         # 统一包成 MessageChain：两条通道内部都会访问 .chain
         chain = MessageChain(list(records))
+        # 收集本次要发的纯文字（仅 Plain 组件），发送成功后登记，用于拦截「框架把机器人自己
+        # 发出的消息再次路由回 on_decorating_result」导致的自触发循环（见 on_decorating_result）。
+        plain_texts = [c.text for c in records if getattr(c, "text", None)]
         # 首选：官方主动消息 API，真正调用平台投递（见注意③）
         try:
             await self.context.send_message(event.unified_msg_origin, chain)
             logger.info(f"[cosyvoice] 主动推送成功(context.send_message) 组件={types}")
+            for _t in plain_texts:
+                self._sent_spoken_texts[_t] = time.time()
             return True
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[cosyvoice] context.send_message 失败（尝试 event.send）: {e}")
@@ -602,6 +612,8 @@ class CosyVoicePlugin(Star):
             if callable(send):
                 await send(chain)
                 logger.info(f"[cosyvoice] 主动推送成功(event.send) 组件={types}")
+                for _t in plain_texts:
+                    self._sent_spoken_texts[_t] = time.time()
                 return True
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[cosyvoice] event.send 也失败: {e} | 组件={types}")
@@ -799,6 +811,16 @@ class CosyVoicePlugin(Star):
             )
             if not text_in_chain:
                 await self._fallback_text(event, full_text, send_mode, text_in_chain)
+            return
+
+        # 防自触发循环：本插件用 context.send_message 主动推送的文字，会被 AStrBot 框架再次
+        # 路由回本钩子（event 的 origin 变为机器人自身、与用户 origin 不同），使原 message_id /
+        # origin 级去重失效，出现「合成→推送→再合成」、每条回复念两遍。这里用「最近主动推送过的
+        # 文本」拦截这类二次触发（60s 窗口；正常用户连发相同内容极少，且只是本次不念、影响可忽略）。
+        now = time.time()
+        for _t in [k for k, ts in self._sent_spoken_texts.items() if ts < now - 60]:
+            del self._sent_spoken_texts[_t]
+        if full_text and full_text in self._sent_spoken_texts:
             return
 
         # 本轮同一条消息若已成功合成过（框架可能重复触发 on_decorating_result），
@@ -1289,8 +1311,10 @@ class CosyVoicePlugin(Star):
         )
         try:
             # 直接传组件列表：chain_result() 会改写事件自身结果链，主动推送无需也不应改动它
-            await self.context.send_message(
-                event.unified_msg_origin, MessageChain([Comp.Plain(full_text)])
+            # 走 _realtime_send：成功时会登记 full_text，避免「回退文字被框架再次路由回本钩子」
+            # 引发的 fallback 自触发循环（表现同合成循环）。
+            await self._realtime_send(
+                event, [Comp.Plain(full_text)]
             )
             logger.info("[cosyvoice] 语音失败，已退化为补发文字")
         except Exception as e:  # noqa: BLE001

@@ -2,6 +2,12 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.1.30 (2026-08-30)
+
+- fix: 修复 LLM 回复被语音合成两遍（循环）的问题。`text_in_chain=False`（不合并 both / voice_only）模式下，插件用 `context.send_message` 主动逐段推送语音与文字，AStrBot 框架会把机器人自己发出的这些消息再次路由回 `on_decorating_result`；由于该事件的 `unified_msg_origin` 变为机器人自身 origin（与用户 origin 不同），原有的 `message_id` / `origin+full_text` 去重全部失效，导致「合成→推送→再合成」的循环，每条回复念两遍。
+  - 修复：新增 `_sent_spoken_texts` 记录本插件主动推送出去的文字内容（含回退文字与两段兜底通道），在 `on_decorating_result` 开头用「最近 60s 主动推送过的文本」拦截这类自触发（正常用户连发相同内容极少，且只是本次不念、影响可忽略）。原有的 message_id / origin 级去重保留作为第一、二道防线。
+- 版本 v2.1.29 → v2.1.30。
+
 ## v2.1.29 (2026-08-30)
 
 - fix: 修复 LLM 回复转语音后，用户看到的文字消息里残留副语言标记（[breath]/[laughter]…），在前端被渲染成 ||/方块的问题。
