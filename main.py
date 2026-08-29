@@ -1131,12 +1131,18 @@ class CosyVoicePlugin(Star):
                                         f"[cosyvoice] 分段语音合成失败（跳过该段）: "
                                         f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
                                     )
-                                if not await self._realtime_send(event, [Comp.Plain(seg)]):
-                                    logger.warning("[cosyvoice] 分段文字发送失败（已尝试补发）")
+                                try:
+                                    if not await self._realtime_send(event, [Comp.Plain(seg)]):
+                                        logger.warning("[cosyvoice] 分段文字发送失败（已尝试补发）")
+                                except Exception as e:  # noqa: BLE001
+                                    logger.warning(f"[cosyvoice] 分段文字发送异常（跳过）: {e}")
                             else:
                                 # 先文字后语音（原行为）
-                                if not await self._realtime_send(event, [Comp.Plain(seg)]):
-                                    logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
+                                try:
+                                    if not await self._realtime_send(event, [Comp.Plain(seg)]):
+                                        logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
+                                except Exception as e:  # noqa: BLE001
+                                    logger.warning(f"[cosyvoice] 分段文字发送异常（跳过）: {e}")
                                 wav = await self.engine.synthesize(seg_audio, voice, pre_translated=True)
                                 if wav:
                                     sent_any = True
@@ -1167,19 +1173,42 @@ class CosyVoicePlugin(Star):
                                 )
                             return
                     else:
-                        # 单行（无换行/句末标点分段）：按 text_after_voice 决定文字与语音先后
-                        if not text_after_voice:
-                            # 先文字后语音（原行为，单组件消息平台兼容）
-                            if not await self._realtime_send(event, [Comp.Plain(base_text)]):
-                                logger.warning("[cosyvoice] 整条文字发送失败（语音仍尝试）")
+                        # 单行（无换行/句末标点分段）：按语音合成的实际段边界（iter_segment_items）
+                        # 逐段发送语音与文字，保证「每段语音都配一段文字」、段数严格一致——
+                        # 原来文字固定发整条 base_text、语音却走 iter_segment_wavs，一旦合成层把整条
+                        # 切成多段 wav，就会出现「多段语音却只有一条文字」。
+                        # 文字用 _clean_display 去掉副语言标记与括号（仅服务语音合成，不该泄漏到文字）。
                         sent_any = False
-                        async for wav in self.engine.iter_segment_wavs(synth_text, voice, pre_translated=True):
-                            sent_any = True
-                            audio.schedule_cleanup(wav)
-                            try:
-                                await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
-                            except Exception as e:  # noqa: BLE001
-                                logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
+                        async for ch, wav in self.engine.iter_segment_items(synth_text, voice, pre_translated=True):
+                            ch_text = self._clean_display(ch)
+                            if text_after_voice:
+                                # 先语音后文字：语音成功先发语音；语音失败也补发文字（不丢）
+                                if wav:
+                                    sent_any = True
+                                    audio.schedule_cleanup(wav)
+                                    try:
+                                        await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
+                                    except Exception as e:  # noqa: BLE001
+                                        logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
+                                try:
+                                    if not await self._realtime_send(event, [Comp.Plain(ch_text)]):
+                                        logger.warning("[cosyvoice] 分段文字发送失败（已尝试补发）")
+                                except Exception as e:  # noqa: BLE001
+                                    logger.warning(f"[cosyvoice] 分段文字发送异常（跳过）: {e}")
+                            else:
+                                # 先文字后语音（原行为）
+                                try:
+                                    if not await self._realtime_send(event, [Comp.Plain(ch_text)]):
+                                        logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
+                                except Exception as e:  # noqa: BLE001
+                                    logger.warning(f"[cosyvoice] 分段文字发送异常（跳过）: {e}")
+                                if wav:
+                                    sent_any = True
+                                    audio.schedule_cleanup(wav)
+                                    try:
+                                        await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
+                                    except Exception as e:  # noqa: BLE001
+                                        logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
                         if not sent_any:
                             # 仅「服务端故障」才熔断冷却。配置/内容类失败（无音色、
                             # 无有效可合成文本）冷却毫无意义——重试也不会好转，
@@ -1196,10 +1225,6 @@ class CosyVoicePlugin(Star):
                                     f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
                                 )
                             return
-                        if text_after_voice:
-                            # 语音已发，再补发整条文字（先听后读）
-                            if not await self._realtime_send(event, [Comp.Plain(base_text)]):
-                                logger.warning("[cosyvoice] 整条文字发送失败（已尝试补发）")
                     # 括号内容单独补发一条文字：正文各段（含单行）都取自剥离括号后的
                     # base_text，不含任何括号内容，故此处补发不会与正文重复。
                     if bracket_text:

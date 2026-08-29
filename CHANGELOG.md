@@ -2,6 +2,14 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.1.31 (2026-08-30)
+
+- fix: 修复「多段语音 + 一条文字」（如两段语音只发一段文本）的不一致。
+  - 根因：`text_in_chain=False` 的 both 模式里，单行（无换行/句末标点分段）分支的文字固定发整条 `base_text`，而语音走 `iter_segment_wavs`——一旦合成层把整条文本切成多段 wav，就出现「多段语音、单条文字」。
+  - 修复：单行分支改为按语音合成的实际段边界（`iter_segment_items` 的每一段）逐段发送语音与文字，保证「每段语音都配一段文字」、段数严格一致；文字同样经 `_clean_display` 去副语言标记。
+  - 另：多段分支与单行分支的文字发送统一加 try/except，避免某段文字发送抛异常时中断整个任务、吞掉后续段。
+- 版本 v2.1.30 → v2.1.31。
+
 ## v2.1.30 (2026-08-30)
 
 - fix: 修复 LLM 回复被语音合成两遍（循环）的问题。`text_in_chain=False`（不合并 both / voice_only）模式下，插件用 `context.send_message` 主动逐段推送语音与文字，AStrBot 框架会把机器人自己发出的这些消息再次路由回 `on_decorating_result`；由于该事件的 `unified_msg_origin` 变为机器人自身 origin（与用户 origin 不同），原有的 `message_id` / `origin+full_text` 去重全部失效，导致「合成→推送→再合成」的循环，每条回复念两遍。
