@@ -688,8 +688,28 @@ class CosyVoicePlugin(Star):
         return self._BRACKET_RE.sub("", text)
 
     def _extract_brackets(self, text: str) -> str:
-        """提取所有括号内容，按出现顺序拼接成可单独发送的文字（换行分隔）。"""
-        parts = [p.strip() for p in self._BRACKET_RE.findall(text) if p and p.strip()]
+        """提取所有【普通】括号内容，按出现顺序拼接成可单独发送的文字（换行分隔）。
+
+        排除语音标记白名单（[breath] [laughter] 等副语言标记）：它们用方括号包裹，
+        会被 _BRACKET_RE 误当成「不朗读的括号内容」提取，导致单独补发出一条莫名其妙的
+        "breath" / "laughter" 文字（即用户看到的「括号被删了、还单独发了一条怪内容」）。
+        做法：先把白名单标记替换成不含括号的占位符，再提取普通括号，占位符不影响提取。
+        """
+        if not text:
+            return ""
+        tmp = text
+        if MARKUP_WHITELIST_RE.search(text):
+            ph: dict = {}
+            cnt = [0]
+
+            def _protect(m):
+                key = f"\x00COSY{cnt[0]}\x00"
+                cnt[0] += 1
+                ph[key] = m.group(0)
+                return key
+
+            tmp = MARKUP_WHITELIST_RE.sub(_protect, text)
+        parts = [p.strip() for p in self._BRACKET_RE.findall(tmp) if p and p.strip()]
         return "\n".join(parts)
 
     # ---------- 装饰结果钩子：不阻塞管线，文字立刻发，语音后台补 ----------
@@ -867,6 +887,14 @@ class CosyVoicePlugin(Star):
         # 关键：本钩子【不 await 合成】，文字立刻交给 AstrBot 发出（若保留在链上），避免占用
         # 事件循环、卡住同一会话/全局的其他消息。语音合成放到后台任务，合成完再主动补发。
         # 这样「等一会儿」可接受，但绝不阻塞其他事件。
+        # 关键幂等：在【启动后台任务之前】就把 full_text 登记到 _decorated。原逻辑把登记
+        # 延迟到 _background_speak 完成时、且键用 display_text，导致两个缺陷：
+        # ① 登记时机太晚——_background_speak 是异步的，若框架（streaming / 工具循环 / 私聊
+        #   reaction 链路）在后台任务完成前重复触发本钩子，done 仍为空，会再起一个后台任务，
+        #   同一条回复被合成并重复发送；② 键不一致（检查用 full_text、登记用 display_text），
+        #   翻译/括号处理后二者不同，幂等永远不命中。提前用 full_text 登记，任何重复触发立即
+        #   被上方 771 行拦截，从根本上杜绝重复发送。
+        self._decorated.setdefault(origin, set()).add(full_text)
         task = asyncio.ensure_future(
             self._background_speak(
                 event, display_text, voice, send_mode, merge, origin, text_in_chain,
@@ -1189,9 +1217,9 @@ class CosyVoicePlugin(Star):
                                     f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
                                 )
                             return
-            # 整轮成功后才登记幂等 + 解除冷却
+            # 整轮成功后才登记幂等 + 解除冷却（键统一为 full_text，与 771 行检查一致）
             self._mark_server_ok()
-            self._decorated.setdefault(origin, set()).add(display_text)
+            self._decorated.setdefault(origin, set()).add(full_text)
             bucket = self._decorated.get(origin)
             if bucket and len(bucket) > 20:
                 self._decorated[origin] = set(list(bucket)[-20:])
