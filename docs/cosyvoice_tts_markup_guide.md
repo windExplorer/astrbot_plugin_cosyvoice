@@ -278,8 +278,10 @@ CosyVoice3 要求日文必须转成**片假名**才能正常合成（`example.py
 | `auto_breath` | bool | `true` | 标点换气：句末 `。！？…` 插 `[breath]`、句中 `，、；：` 插 `[quick_breath]`、波浪号 `~/～` 后插 `[quick_breath]`（拖音短停顿）。低风险，默认开。 |
 | `auto_effect` | bool | `false` | 关键词音效：按语种词典在句末追加 `[laughter]`/`[sigh]`/`[cough]`。易翻车，默认关。 |
 | `effect_intensity` | string | `medium` | 音效密度：`light`（每句≤1）/ `medium`（≤3）/ `strong`（≤5）。仅 `auto_effect=true` 生效。 |
+| `voices.<音色>.markup` | bool | `true` | **音色级**副语言标记总开关：`false` 时该音色**完全不注入**任何标记（换气与音效都不注入），只念纯文本。**优先级高于**全局 `auto_breath` / `auto_effect`。 |
 
 **行为要点**：
+- 音色级开关：`voices.<音色>.markup=false` 可让单个音色跳过全部副语言标记注入，用于「该音色/参考音频对标记敏感，插入 `[breath]`/`[laughter]` 后音色失真、读法怪异」的场景；其余音色仍按全局配置正常注入。可在 AstrBot 配置页的音色项里设置，也可用 WebUI 音色库编辑。
 - 语种判定：优先取 `voices.<音色>.language`（`zh`/`ja`/`en`），缺失则按字符特征推断（含片假名→ja，纯字母→en，否则 zh）。
 - 标记隔离：自动插入的标记**只进合成文本**（`tts_text`），绝不污染展示文字与 `prompt_text`。
 - 白名单：`[laughter]` `[breath]` `[quick_breath]` `[sigh]` `[cough]` 等 special token 不会被「剥离括号」逻辑误删。

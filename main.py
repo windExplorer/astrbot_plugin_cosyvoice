@@ -910,7 +910,9 @@ class CosyVoicePlugin(Star):
         # 空则无正文可念（纯括号），跳过合成
         synth_text = audio_text if audio_text is not None else display_text
         vlang = self.engine.voice_language(voice)
-        synth_text = inject_markup(synth_text, vlang, self.config)
+        synth_text = inject_markup(
+            synth_text, vlang, self.config, voice=self.engine.voices.get(voice)
+        )
         if not synth_text.strip():
             logger.info("[cosyvoice] 正文仅含括号内容，跳过语音合成（括号内容已按模式单独发送）")
             self._mark_server_ok()
@@ -950,7 +952,9 @@ class CosyVoicePlugin(Star):
                     for orig, trans in seg_items:
                         disp = trans if tmode == "translated" else (orig if bilingual else (f"{trans}\n中文：{orig}" if trans != orig else orig))
                         # 仅语音文本注入标记（换气/音效）；展示文字 disp 不带标记
-                        trans_voiced = inject_markup(trans, vlang, self.config)
+                        trans_voiced = inject_markup(
+                            trans, vlang, self.config, voice=self.engine.voices.get(voice)
+                        )
                         if text_after_voice:
                             # 先语音后文字：语音成功先发语音，再发对应文字；语音失败也补发文字（不丢）
                             if _has_foreign(trans):
@@ -1033,7 +1037,10 @@ class CosyVoicePlugin(Star):
                             seg_audio = vseg
                             if bilingual:
                                 seg_audio = _strip_chinese(seg_audio)
-                            seg_audio = inject_markup(seg_audio, vlang, self.config)
+                            seg_audio = inject_markup(
+                                seg_audio, vlang, self.config,
+                                voice=self.engine.voices.get(voice),
+                            )
                             if text_after_voice:
                                 # 先语音后文字：语音成功先发语音，再发对应文字；语音失败也补发文字（不丢）
                                 wav = await self.engine.synthesize(seg_audio, voice, pre_translated=True)
@@ -1270,7 +1277,11 @@ class CosyVoicePlugin(Star):
         orig_text = text
         if self.config.get("skip_bracket_tts", True):
             text = self._strip_brackets(text)
-            text = inject_markup(text, self.engine.voice_language(self._session_voice(event)), self.config)
+            _sv = self._session_voice(event)
+            text = inject_markup(
+                text, self.engine.voice_language(_sv), self.config,
+                voice=self.engine.voices.get(_sv),
+            )
             if not text.strip():
                 yield event.plain_result("括号里的内容我就不念啦～")
                 return
@@ -1606,7 +1617,10 @@ class CosyVoicePlugin(Star):
         text = clean_tts_text(text)
 
         target_voice = voice or self._session_voice(event)
-        tts_text = inject_markup(text.strip(), self.engine.voice_language(target_voice), self.config)
+        tts_text = inject_markup(
+            text.strip(), self.engine.voice_language(target_voice), self.config,
+            voice=self.engine.voices.get(target_voice),
+        )
         merge = bool(self.config.get("segment_merge", False))
         try:
             if merge:

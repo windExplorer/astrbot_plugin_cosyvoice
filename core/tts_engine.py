@@ -239,6 +239,8 @@ class TtsEngine:
                         "prompt_text": v.get("prompt_text", "") or "",
                         "hidden": bool(v.get("hidden", False)),
                         "language": (v.get("language") or "").strip().lower(),
+                        # 音色级副语言标记开关，缺省 True（注入）
+                        "markup": bool(v.get("markup", True)),
                     }
         elif isinstance(voices, list):
             for item in voices:
@@ -252,6 +254,8 @@ class TtsEngine:
                     "prompt_text": item.get("prompt_text", "") or "",
                     "hidden": bool(item.get("hidden", False)),
                     "language": (item.get("language") or "").strip().lower(),
+                    # 音色级副语言标记开关，缺省 True（注入）
+                    "markup": bool(item.get("markup", True)),
                 }
         return d
 

@@ -208,6 +208,8 @@ def _list_voices(plugin):
                 "prompt_text": v.get("prompt_text", ""),
                 "language": v.get("language", "") or "",
                 "hidden": bool(v.get("hidden", False)),
+                # 音色级副语言标记开关（false=该音色不注入 [breath] 等标记）
+                "markup": bool(v.get("markup", True)),
                 "is_default": name == default,
                 "in_lib": name in plugin._voices_lib,  # 是否由 WebUI 管理
                 # 本地能否解析到参考音频（排查用）
@@ -227,6 +229,7 @@ def _create_voice(plugin):
         prompt_text = str(payload.get("prompt_text") or "").strip()
         language = str(payload.get("language") or "").strip().lower()
         hidden = bool(payload.get("hidden", False))
+        markup = bool(payload.get("markup", True))
         if not name:
             return error_response("音色名不能为空", status_code=400)
         if name in plugin._effective_voices():
@@ -236,6 +239,7 @@ def _create_voice(plugin):
             "prompt_text": prompt_text,
             "language": language,
             "hidden": hidden,
+            "markup": markup,
         }
         plugin._save_voices_lib()
         plugin._refresh_cfg()
@@ -257,6 +261,7 @@ def _update_voice(plugin):
             "prompt_text": plugin.engine.voices.get(name, {}).get("prompt_text", ""),
             "language": plugin.engine.voices.get(name, {}).get("language", ""),
             "hidden": bool(plugin.engine.voices.get(name, {}).get("hidden", False)),
+            "markup": bool(plugin.engine.voices.get(name, {}).get("markup", True)),
         }))
         if "prompt_wav" in payload:
             entry["prompt_wav"] = str(payload["prompt_wav"] or "").strip()
@@ -266,6 +271,8 @@ def _update_voice(plugin):
             entry["hidden"] = bool(payload["hidden"])
         if "language" in payload:
             entry["language"] = str(payload["language"] or "").strip().lower()
+        if "markup" in payload:
+            entry["markup"] = bool(payload["markup"])
         plugin._voices_lib[name] = entry
         plugin._save_voices_lib()
         plugin._refresh_cfg()

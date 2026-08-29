@@ -179,13 +179,22 @@ def detect_lang(text: str, voice_lang: str | None = None) -> str:
     return "zh"
 
 
-def inject_markup(text: str, lang: str, cfg: dict) -> str:
+def inject_markup(text: str, lang: str, cfg: dict, voice: dict | None = None) -> str:
     """统一入口：仅作用于合成文本。
 
     - auto_breath 默认开（低风险）；auto_effect 默认关。
+    - 音色级开关：voices.<音色>.markup=false 时，该音色**完全不注入**任何副语言标记。
+      部分音色/参考音频对标记敏感，插入换气、笑声后会音色失真或读法怪异，需能单独关掉。
     - 注入顺序：关键词音效（句末追加）→ 标点换气（标点后插入）。
+
+    :param voice: 当前音色配置 dict（voices.<音色>），用于读取音色级 markup 开关；
+                  传 None 或该音色未配置 markup 时按全局配置执行。
     """
     if not text:
+        return text
+    # 音色级总开关：显式为 False 时，该音色完全不注入副语言标记，
+    # 优先级高于全局 auto_breath / auto_effect。
+    if voice is not None and not voice.get("markup", True):
         return text
     auto_breath = cfg.get("auto_breath", True)
     auto_effect = cfg.get("auto_effect", False)
