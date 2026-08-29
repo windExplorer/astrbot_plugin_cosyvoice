@@ -691,6 +691,19 @@ class CosyVoicePlugin(Star):
             return tmp
         return self._BRACKET_RE.sub("", text)
 
+    def _clean_display(self, text: str) -> str:
+        """展示用文字：去除普通括号内容、并去除副语言标记（[breath]/[laughter]…）。
+
+        副语言标记只服务语音合成（让 CosyVoice 念出换气/笑声），不该泄漏到用户看到的
+        文字消息里——否则会显示成 [breath] 之类（部分前端会渲染成 || 方块）。
+        与 _strip_brackets 的区别：_strip_brackets 为保护语音而**保留**副语言标记；
+        本方法为展示而**删除**它们。处理顺序：先删副语言标记，再删普通括号。
+        """
+        if not text:
+            return text
+        t = MARKUP_WHITELIST_RE.sub("", text)
+        return self._BRACKET_RE.sub("", t)
+
     def _extract_brackets(self, text: str) -> str:
         """提取所有【普通】括号内容，按出现顺序拼接成可单独发送的文字（换行分隔）。
 
@@ -866,7 +879,7 @@ class CosyVoicePlugin(Star):
             # （原文 / 译文 / 译文+换行+原文：）
             for c in result.chain:
                 if isinstance(c, Comp.Plain):
-                    c.text = display_text
+                    c.text = self._clean_display(display_text)
 
         # 括号内容不朗读：仅从「语音合成文本」剥离括号内容。
         # - 合并模式：文字留在结果链（含括号），语音不念，不单独补发；
@@ -1057,8 +1070,9 @@ class CosyVoicePlugin(Star):
                     # 括号内容常含句末标点（如「（笑。）」），若在原文上分段会把句子从括号处
                     # 切断，既让文字出现半截句，又造成文字段与语音段数量错位。
                     # 剥离后分段，括号内容改由 bracket_text 单独补发一条文字消息。
-                    skip_bracket = bool(self.config.get("skip_bracket_tts", True))
-                    base_text = self._strip_brackets(display_text) if skip_bracket else display_text
+                    # 展示文字用 _clean_display：去普通括号 + 去副语言标记（[breath] 等），
+                    # 这些标记只给语音合成用，不能泄漏到用户看到的文字里。
+                    base_text = self._clean_display(display_text)
                     segs = self.engine.split_text(base_text)
                     vsegs = self.engine.split_text(audio_text) if audio_text is not None else segs
                     if len(segs) > 1 or len(vsegs) > 1:
@@ -1340,7 +1354,7 @@ class CosyVoicePlugin(Star):
                 yield event.plain_result(empty_hint)
             else:
                 if self._effective_send_mode(event, self._refresh_cfg()) == "both":
-                    yield event.plain_result(orig_text)
+                    yield event.plain_result(self._clean_display(orig_text))
                 self._push_event(True, "指令语音已发送")
         except QueueFullError:
             # 排队过长：服务端在线但繁忙，进冷却避免反复打繁忙服务器，提示稍后再试
