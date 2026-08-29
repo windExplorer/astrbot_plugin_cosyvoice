@@ -714,7 +714,12 @@ class CosyVoicePlugin(Star):
         if not text:
             return text
         t = MARKUP_WHITELIST_RE.sub("", text)
-        return self._BRACKET_RE.sub("", t)
+        t = self._BRACKET_RE.sub("", t)
+        # 兜底：个别副语言标记变体可能漏过上面的白名单正则，在某些前端被渲染成 ||
+        # 方块（如 [laughter] 等）。正常文本极少连续出现两个竖线，这里把 2 个及以上
+        # 连续竖线一并清掉，避免语音标记泄漏到用户实际看到的文字里。
+        t = re.sub(r"\|{2,}", "", t)
+        return t
 
     def _extract_brackets(self, text: str) -> str:
         """提取所有【普通】括号内容，按出现顺序拼接成可单独发送的文字（换行分隔）。
