@@ -185,6 +185,13 @@
     "hint": "llm_only=仅转大模型回复；all_text=对所有文本结果（含指令输出）转语音",
     "default": "llm_only"
   },
+  "agent_intermediate_tts": {
+    "type": "bool",
+    "title": "Agent 中间轮也朗读",
+    "description": "Agent（工具循环）模式下，模型边说边调工具时的正文是否也合成语音",
+    "hint": "默认开启。开启后，大模型「先说一句、再调工具」时那句正文也会配音（否则它只会作为纯文字发出、没有声音，且最终轮再合成一遍会造成同一段文字重复发两次）。关闭则回到旧行为：只有 agent 跑完的最终回复才转语音。",
+    "default": true
+  },
   "enable_llm_tool": {
     "type": "bool",
     "title": "启用 LLM 工具",

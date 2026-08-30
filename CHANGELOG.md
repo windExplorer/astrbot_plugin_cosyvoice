@@ -2,6 +2,16 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.1.33 (2026-08-30)
+
+- fix: 修复 Agent（工具循环）模式下，模型「边说边调工具」的正文没有语音、且同一段文字被发两遍。
+  - 现象：开启 Agent 的会话里，模型先输出一句正文再调用工具（如 `text_to_speech` / `send_message_to_user`）时，那句正文由 AstrBot 直接以纯文字发出（无语音）；等 agent 跑完的最终回复才被本插件接管配音并逐段补发文字，于是群里出现「两段相同文字」，且前一段没有声音。
+  - 根因：`on_llm_response` 只在 agent 跑完（`MainAgentHooks.on_agent_done`）时 dispatch 一次，工具循环里的中间轮不触发；而 `_should_tts` 在 `tts_scope=llm_only` 下判断「本条是否大模型回复」只认 `is_llm` / `llm_this_round` / `_last_llm` 三个依据，中间轮一个都不满足 → 被判成非大模型回复直接 return，既不配音、也不把正文从结果链移除交由本插件接管。
+  - 修复：新增第 4 条判定依据 `_is_llm_result()`——读结果链的 `result_content_type`，命中 `ResultContentType.LLM_RESULT` 即视为大模型回复（该标记由 AstrBot 的 `run_agent` 给每一轮 `llm_result` 打上，中间轮同样携带）。按 `name` 字符串比较而不 import 枚举，规避不同 AstrBot 版本模块位置（api.event / core.message.message_event_result）与 `enum.auto()` 取值不一致。
+  - 去重：中间轮一旦被接管，照常登记 `full_text` 到 `_decorated`、`message_id` 到 `_spoken_msgs`，最终轮文本相同时自动跳过，不会同一段话念两遍；中间轮进入时打一条 DEBUG 日志便于排查。
+  - 新增配置项 `agent_intermediate_tts`（默认 true）控制该行为。若模型频繁「说一句 + 调一次工具」造成语音条数过多、合成请求堆积，可关闭回到旧行为（只有最终回复转语音）。
+- 版本 v2.1.32 → v2.1.33。
+
 ## v2.1.32 (2026-08-30)
 
 - fix: 兜底过滤展示文字中的连续竖线 `||`。

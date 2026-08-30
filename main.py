@@ -91,6 +91,27 @@ def _has_foreign(text: str) -> bool:
     """
     return bool(_FOREIGN_RE.search(text or ""))
 
+
+def _result_is_llm(result) -> bool:
+    """结果链是否为「大模型产出」（ResultContentType.LLM_RESULT）。
+
+    覆盖 Agent 工具循环的中间轮：AstrBot 的 run_agent 对每一轮 llm_result 都会打上
+    该标记，而 on_llm_response 只在 agent 跑完时触发一次（见下）。
+
+    用 name 字符串比较而非 import ResultContentType 枚举：该枚举的模块位置在不同
+    AstrBot 版本不一致（api.event / core.message.message_event_result），且成员用
+    enum.auto() 赋值、数值不稳定，按 name 比较最稳、也免去版本兼容导入。
+    """
+    ct = getattr(result, "result_content_type", None)
+    if ct is None:
+        return False
+    name = getattr(ct, "name", "") or ""  # 仅 Enum 成员有 name 属性
+    if name:
+        return name == "LLM_RESULT"
+    # 兜底：个别版本可能是字符串形态
+    return str(ct).upper().endswith("LLM_RESULT")
+
+
 # 语音服务器连不上时统一给用户的提示（大模型也需要能看懂这是服务器故障）。
 # 提示均为「独立发送」的消息（主动推送 / 指令结果 / 工具补发），前面无正文，
 # 不再加前导换行，避免消息开头出现空白行。
@@ -513,6 +534,25 @@ class CosyVoicePlugin(Star):
             return False
         return True
 
+    def _is_llm_result(self, event: AstrMessageEvent, cfg: dict) -> bool:
+        """结果链是否为大模型产出（覆盖 Agent 工具循环的「中间轮」）。
+
+        Agent（工具循环）模式下，模型常「边说边调工具」：每一轮的正文都会被 run_agent
+        以 ResultContentType.LLM_RESULT 直发出去，但 on_llm_response 只在 agent 跑完
+        （MainAgentHooks.on_agent_done）时 dispatch 一次，中间轮不触发 → _should_tts
+        里 is_llm / llm_this_round / _last_llm 三个依据全落空，被误判成「非 LLM 回复」：
+        既不给这些话配音，也不从结果链接管文字，等最终轮再合成一遍，于是同一段文字
+        在群里出现两遍、且前半段没声音。这里用结果链自带的内容类型标记补判。
+        由配置 agent_intermediate_tts 控制（默认开启）。
+        """
+        if not bool(cfg.get("agent_intermediate_tts", True)):
+            return False
+        try:
+            result = event.get_result()
+        except Exception:  # noqa: BLE001
+            return False
+        return _result_is_llm(result)
+
     def _should_tts(self, event: AstrMessageEvent, cfg: dict) -> bool:
         if not self._in_scope(event, cfg):
             return False
@@ -543,12 +583,23 @@ class CosyVoicePlugin(Star):
             #   1) llm_this_round：本轮确实触发过 on_llm_response 的标记（最精确，随本轮
             #      _flags 清理，不会残留到下一轮）；
             #   2) is_llm：on_llm_response 设置的标志；
-            #   3) llm_recorded：_last_llm 存在本轮大模型原文（钩子路径差异兜底）。
+            #   3) llm_recorded：_last_llm 存在本轮大模型原文（钩子路径差异兜底）；
+            #   4) 结果链的 LLM_RESULT 内容类型（下方 llm_result_chain，覆盖 Agent 中间轮）。
             # 绝不使用「上一轮残留的 _last_llm」——否则同会话里其他插件的固定文案
             # （非大模型消息）也会被误转语音。
             llm_this_round = self._get_flag(event, "llm_this_round", False)
             llm_recorded = bool(self._last_llm.get(event.unified_msg_origin))
-            is_llm_reply = bool(is_llm or llm_this_round or llm_recorded)
+            # 4) 结果链自身的 LLM_RESULT 标记（覆盖 Agent 工具循环的中间轮）——
+            #    上面三个依据都依赖 on_llm_response，而它只在 agent 跑完时触发一次，
+            #    工具循环里模型「边说边调工具」的正文不会触发，必须靠这里兜住。
+            llm_result_chain = self._is_llm_result(event, cfg)
+            is_llm_reply = bool(
+                is_llm or llm_this_round or llm_recorded or llm_result_chain
+            )
+            if llm_result_chain and not (is_llm or llm_this_round or llm_recorded):
+                logger.debug(
+                    "[cosyvoice] 命中 Agent 中间轮（LLM_RESULT），按大模型回复处理并转语音"
+                )
             base = bool(is_llm_reply and (auto or want or session_on))
         else:
             # all_text：自动开启则全部；否则仅关键词/工具触发或本会话已开
