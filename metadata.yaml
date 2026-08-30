@@ -1,7 +1,7 @@
 name: astrbot_plugin_cosyvoice # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
 display_name: CosyVoice3 语音合成 # 用于展示的名字
 desc: 接入本地 CosyVoice3 推理服务，让机器人以可配置音色朗读回复（支持 LLM 工具、/tts 指令与关键词触发）。 # 插件简短描述
-version: v2.1.34 # 插件版本号
+version: v2.1.35 # 插件版本号
 author: Yours # 作者
 repo: https://github.com/AstrBotDevs/AstrBot # 插件的仓库地址（请替换为你的仓库）
 
@@ -142,8 +142,8 @@ config:
     type: bool
     title: 括号内容不朗读
     description: 开启后，正文中被括号包裹的文字不进入语音合成
-    hint: 支持 中文（）/ 英文() / 方括号[]。默认关闭（不过滤：括号内容照常朗读与显示）。开启后：both 合并模式括号内容随文字显示在聊天记录、仅语音不念；voice_only 或不合并 both 下括号内容单独作为一条文字消息发给用户。/tts 指令同样受此控制。
-    default: false
+    hint: 支持 中文（）/ 英文() / 方括号[]。默认开启（语音不朗读括号内容，但发出的文字仍带括号）；关闭后括号内容也会念出来。both 合并模式括号内容随文字显示在聊天记录；不合并 both 下正文剥离括号、括号内容单独作为一条文字消息发给用户。/tts 指令同样受此控制。
+    default: true
   - key: auto_tts
     type: bool
     title: 自动语音
