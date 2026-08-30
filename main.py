@@ -755,22 +755,14 @@ class CosyVoicePlugin(Star):
         return self._BRACKET_RE.sub("", text)
 
     def _clean_display(self, text: str) -> str:
-        """展示用文字：去除普通括号内容、并去除副语言标记（[breath]/[laughter]…）。
+        """展示用文字：原样透传，不再做任何过滤。
 
-        副语言标记只服务语音合成（让 CosyVoice 念出换气/笑声），不该泄漏到用户看到的
-        文字消息里——否则会显示成 [breath] 之类（部分前端会渲染成 || 方块）。
-        与 _strip_brackets 的区别：_strip_brackets 为保护语音而**保留**副语言标记；
-        本方法为展示而**删除**它们。处理顺序：先删副语言标记，再删普通括号。
+        历史：v2.1.29 起本方法会删除副语言标记（[breath]/[laughter]…）与普通括号内容，
+        v2.1.32 又追加删除连续竖线 ||，用于在用户看到的文字里隐藏「只服务语音合成」的标记。
+        但这样会把模型原本回复里的括号、标签、竖线全抹掉，用户希望文字还原原文观感，
+        故改为原样返回。语音侧是否需要念括号由配置 skip_bracket_tts 控制（默认也已关闭）。
         """
-        if not text:
-            return text
-        t = MARKUP_WHITELIST_RE.sub("", text)
-        t = self._BRACKET_RE.sub("", t)
-        # 兜底：个别副语言标记变体可能漏过上面的白名单正则，在某些前端被渲染成 ||
-        # 方块（如 [laughter] 等）。正常文本极少连续出现两个竖线，这里把 2 个及以上
-        # 连续竖线一并清掉，避免语音标记泄漏到用户实际看到的文字里。
-        t = re.sub(r"\|{2,}", "", t)
-        return t
+        return text
 
     def _extract_brackets(self, text: str) -> str:
         """提取所有【普通】括号内容，按出现顺序拼接成可单独发送的文字（换行分隔）。
