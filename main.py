@@ -869,6 +869,12 @@ class CosyVoicePlugin(Star):
         for _t in [k for k, ts in self._sent_spoken_texts.items() if ts < now - 60]:
             del self._sent_spoken_texts[_t]
         if full_text and full_text in self._sent_spoken_texts:
+            # 重复触发（框架把本插件主动推送的文字再路由回本钩子的回环）：文本已由
+            # 首次触发安排语音/文字，这里除跳过合成外，还必须清掉结果链里的文字——
+            # 否则提前 return 后链上 Plain 原样下发，管线会再发一遍，造成「文字重复」。
+            if not text_in_chain:
+                result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
+            logger.info("[cosyvoice] 重复触发（主动推送回环）：跳过合成并移除链上文字，避免重复发送")
             return
 
         # 本轮同一条消息若已成功合成过（框架可能重复触发 on_decorating_result），
@@ -876,6 +882,12 @@ class CosyVoicePlugin(Star):
         origin = event.unified_msg_origin
         done = self._decorated.get(origin, set())
         if full_text in done:
+            # 重复触发（如 Agent 工具循环的中间轮/最终轮正文相同）：首次触发已安排
+            # 语音与文字，这里跳过合成，且同样必须清链——去重检查在「移除链上 Plain」
+            # 之前，不清链的话结果链文字会随管线再发一遍（用户日志里的「又重复了」即此因）。
+            if not text_in_chain:
+                result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
+            logger.info("[cosyvoice] 重复触发（文本已处理）：跳过合成并移除链上文字，避免重复发送")
             return
 
         voice_name, _, _ = self.engine.resolve_voice(voice)
