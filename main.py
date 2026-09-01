@@ -1044,6 +1044,8 @@ class CosyVoicePlugin(Star):
             f"[cosyvoice] 后台合成开始 | send_mode={send_mode} merge={merge} "
             f"text_in_chain={text_in_chain} 文本长度={len(display_text)}字"
         )
+        # 排查日志：完整打印送入合成的文本（含标记注入后的形态），便于核对分段/剥括号是否有误
+        logger.info(f"[cosyvoice] 合成文本={synth_text!r}")
         # 文字与语音的发送先后：true=每段先语音后文字（先听后读）；false=先文字后语音（原行为）。
         # 仅影响不合并 both（逐段发送）模式。
         text_after_voice = bool(self.config.get("text_after_voice", True))
@@ -1137,28 +1139,27 @@ class CosyVoicePlugin(Star):
                     # 语音文本优先用 audio_text（译文/去中文外文），避免把中文翻译也念出来；
                     # 仅 original 模式（audio_text=None）时语音才与 display_text 一致。
                     # 分段源是「含括号的原文」base_text（用户要看到括号，不再从正文删括号）；
-                    # 语音段 vsegs 取自合成文本（skip_bracket_tts 时已剥离括号），保证语音不念括号、
-                    # 文字带括号。副语言标记（[breath]/[laughter] 等）只服务语音合成、由 inject_markup
+                    # 每个文字段的语音文本由该段自身派生（skip_bracket_tts 时剥离本段括号），
+                    # 保证语音不念括号、文字带括号，且文字/语音严格同段一一对应。
+                    # 副语言标记（[breath]/[laughter] 等）只服务语音合成、由 inject_markup
                     # 注入合成文本，不进入展示文字（展示文字为模型原样）。
                     base_text = self._clean_display(display_text)
                     segs = self.engine.split_text(base_text)
-                    vsegs = self.engine.split_text(audio_text) if audio_text is not None else segs
-                    if len(segs) > 1 or len(vsegs) > 1:
+                    # 排查日志：完整打印分段结果（repr 保留空白/换行边界），便于核对分段是否有误
+                    seg_preview = " | ".join(f"段{i + 1}:{s!r}" for i, s in enumerate(segs))
+                    logger.info(f"[cosyvoice] 文字分段 | 段数={len(segs)} 明细: {seg_preview}")
+                    if len(segs) > 1:
                         sent_any = False
                         for i, seg in enumerate(segs):
-                            # 语音段取用：仅当译文分段与文字分段【数量一致】时才逐段对齐取译文。
-                            # 段数不一致时（译文与原文分段天然不同），若用 vsegs[min(i, len-1)]
-                            # 映射，越界的段会复用最后一段语音，表现为「后面的段落重复念前面那段」。
-                            # 故不一致时退回用当前文字段，保证每段念的都是自己的内容。
-                            # 语音段始终取自「剥离括号」的 audio_text 侧（vsegs，无括号），保证
-                            # skip_bracket_tts 时语音绝不念括号；文字段 seg 来自含括号的 base_text
-                            # （带括号展示）。段数不一致时按 min 对齐、越界复用末段语音——仅影响
-                            # 文字/语音段数，语音文本始终不含括号。
-                            if vsegs:
-                                vseg = vsegs[min(i, len(vsegs) - 1)]
+                            # 语音文本由当前文字段【派生】（同一套分段，天然一一对应）：
+                            # - skip_bracket_tts=True 时只剥离本段括号 → 语音不念括号、文字带括号；
+                            # - 旧方案（文字按含括号原文分段、语音按无括号全文另切一套 vsegs）在括号
+                            #   含标点时两套分段边界/数量不一致，min 对齐兜底会导致重复念或念错段。
+                            # - 纯括号段 → vseg 为空 → 本段只发文字、不合成语音。
+                            if self.config.get("skip_bracket_tts", True):
+                                vseg = self._strip_brackets(seg)
                             else:
                                 vseg = seg
-                            # base_text / vseg 在 skip_bracket 时均已剥离括号，无需二次剥离
                             seg_audio = vseg
                             if bilingual:
                                 seg_audio = _strip_chinese(seg_audio)
@@ -1166,9 +1167,15 @@ class CosyVoicePlugin(Star):
                                 seg_audio, vlang, self.config,
                                 voice=self.engine.voices.get(voice),
                             )
+                            # 排查日志：每段的文字与对应语音文本，逐一可对证
+                            logger.info(f"[cosyvoice] 段{i + 1} | 文字={seg!r} 语音={vseg!r}")
+                            seg_has_voice = bool(seg_audio.strip())
                             if text_after_voice:
                                 # 先语音后文字：语音成功先发语音，再发对应文字；语音失败也补发文字（不丢）
-                                wav = await self.engine.synthesize(seg_audio, voice, pre_translated=True)
+                                wav = (
+                                    await self.engine.synthesize(seg_audio, voice, pre_translated=True)
+                                    if seg_has_voice else None
+                                )
                                 if wav:
                                     sent_any = True
                                     audio.schedule_cleanup(wav)
@@ -1176,11 +1183,12 @@ class CosyVoicePlugin(Star):
                                         await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
                                     except Exception as e:  # noqa: BLE001
                                         logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
-                                else:
+                                elif seg_has_voice:
                                     logger.warning(
                                         f"[cosyvoice] 分段语音合成失败（跳过该段）: "
                                         f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
                                     )
+                                # 纯括号段（无语音文本）：只发文字，不合成、不告警
                                 try:
                                     if not await self._realtime_send(event, [Comp.Plain(seg)]):
                                         logger.warning("[cosyvoice] 分段文字发送失败（已尝试补发）")
@@ -1193,7 +1201,10 @@ class CosyVoicePlugin(Star):
                                         logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
                                 except Exception as e:  # noqa: BLE001
                                     logger.warning(f"[cosyvoice] 分段文字发送异常（跳过）: {e}")
-                                wav = await self.engine.synthesize(seg_audio, voice, pre_translated=True)
+                                wav = (
+                                    await self.engine.synthesize(seg_audio, voice, pre_translated=True)
+                                    if seg_has_voice else None
+                                )
                                 if wav:
                                     sent_any = True
                                     audio.schedule_cleanup(wav)
@@ -1201,11 +1212,12 @@ class CosyVoicePlugin(Star):
                                         await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
                                     except Exception as e:  # noqa: BLE001
                                         logger.warning(f"[cosyvoice] 单段语音发送失败（跳过该段）: {e}")
-                                else:
+                                elif seg_has_voice:
                                     logger.warning(
                                         f"[cosyvoice] 分段语音合成失败（跳过该段）: "
                                         f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
                                     )
+                                # 纯括号段（无语音文本）：只发文字，不合成、不告警
                         if not sent_any:
                             # 仅「服务端故障」才熔断冷却。配置/内容类失败（无音色、
                             # 无有效可合成文本）冷却毫无意义——重试也不会好转，
