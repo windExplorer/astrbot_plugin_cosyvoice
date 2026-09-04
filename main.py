@@ -959,10 +959,17 @@ class CosyVoicePlugin(Star):
                         # 逐段分支的行为：语音=译文+副语言标签；文字=译文 + 换行 + 中文：原文（一条发出）。
                         seg_items = [(full_text, translated)]
 
-        # 图文消息（结果链含图片等媒体组件）：文字不再单独发送/补发，只发语音——
-        # 图片等媒体组件留在结果链随管线正常发出；语音失败时仍走回退逻辑补发文字兜底。
+        # 图文消息（结果链含图片等媒体组件）：文字【保留】在结果链、与图片一起作为一条发出；
+        # 后台只补发语音、不再重复补发一遍文字（此前用户看到「文字+图片 → 语音 → 文字」，
+        # 第 3 条就是第 1 条的文字被逐段模式又补发了一遍）。
+        # text_in_chain 置 True：冷却回退（_enter_cooldown/_fallback_text）也不再补发文字。
         has_media = any(isinstance(c, Comp.Image) for c in chain)
-        if not text_in_chain or has_media:
+        if has_media:
+            for c in result.chain:
+                if isinstance(c, Comp.Plain):
+                    c.text = self._clean_display(display_text)
+            text_in_chain = True
+        elif not text_in_chain:
             result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
         else:
             # 合并 both：结果链保留文字，改为按 translate_display_mode 展示
