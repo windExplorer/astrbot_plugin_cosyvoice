@@ -48,6 +48,9 @@ _CODE_FENCE_RE = re.compile(r"```[\s\S]*?```|~~~[\s\S]*?~~~")
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 # 残余的 HTML/XML 标签（<br/>、<span class="x"> 等）：剔除标签本身，保留标签外文本。
 _GENERIC_TAG_RE = re.compile(r"</?[A-Za-z][^>\n]*>")
+# Markdown 强调符号（**加粗**、__下划线加粗__）：星号/下划线会被 TTS 念出来或造成怪顿，
+# 剔除符号本身、保留文字。单星号/单下划线不动（避免误伤乘号等正常用法）。
+_MD_EMPH_RE = re.compile(r"\*\*|__")
 
 
 def _looks_like_tool_call(text: str, start: int) -> int:
@@ -120,6 +123,7 @@ def clean_tts_text(text: str) -> str:
     t = clean_media_placeholders(t)
     t = _INLINE_CODE_RE.sub(" ", t)            # 行内代码剔除
     t = _GENERIC_TAG_RE.sub(" ", t)            # 残余 HTML/XML 标签剔除（保留标签外文本）
+    t = _MD_EMPH_RE.sub("", t)                 # Markdown 强调符号（** / __）剔除
     return clean_tool_calls(t)
 
 

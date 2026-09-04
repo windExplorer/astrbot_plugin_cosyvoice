@@ -177,6 +177,9 @@ class CosyVoicePlugin(Star):
         # 文本精确去重都拦不住。记录每会话最近一次处理的文本键，短时间窗内公共前缀足够长
         # 即视为重试、拦截（见 on_decorating_result）。
         self._recent_texts: dict = {}  # origin -> (ts, full_key)
+        # 同一会话当前在跑的后台合成任务：新回复到达时取消旧任务（新消息优先），
+        # 防止长任务（几十段 × 服务端排队 ~100s/段）霸占队列、把后续消息卡到分钟级延迟。
+        self._origin_tasks: dict = {}  # origin -> asyncio.Task
         # 会话级语音开关（按群持久记忆）：unified_msg_origin -> True
         data_dir = self._data_dir()
         self._session_file = os.path.join(data_dir, "tts_sessions.json")
@@ -1045,6 +1048,13 @@ class CosyVoicePlugin(Star):
         self._decorated.setdefault(origin, set()).add(full_key)
         self._spoken_msgs.add(mid)
         self._recent_texts[origin] = (now, full_key)
+        # 同一会话新回复抢占旧任务：长任务（几十段）逐段合成会把服务端排队拉到分钟级，
+        # 期间新消息若在队列里等待，表现为「语音和消息卡着一直不发」。取消同 origin 尚未
+        # 完成的旧任务，让新回复优先（旧任务已发出的段不回收，未合成的段放弃）。
+        old_task = self._origin_tasks.get(origin)
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
+            logger.info("[cosyvoice] 新回复到达，取消同会话仍在排队的旧合成任务（新消息优先）")
         task = asyncio.ensure_future(
             self._background_speak(
                 event, display_text, full_text, voice, send_mode, merge, origin, text_in_chain,
@@ -1052,6 +1062,7 @@ class CosyVoicePlugin(Star):
                 bracket_text=bracket_text, no_text=has_media,
             )
         )
+        self._origin_tasks[origin] = task
         # 避免「未等待的 Task 异常」警告刷屏
         # 任务结束（成功/失败/异常）统一清理该消息的去重标记，允许后续不同消息正常合成
         task.add_done_callback(lambda t: (self._spoken_msgs.discard(mid), self._log_task_exc(t)))
@@ -1086,6 +1097,9 @@ class CosyVoicePlugin(Star):
 
         失败则进入冷却 + 回退文字（见 _enter_cooldown）；冷却期内不再打服务端。
         """
+        # 任务级超时基准：服务端排队积压时单段可达 ~110s，几十段的长任务若不设上限
+        # 会霸占队列几十分钟。超过 _BG_MAX_SECS 放弃剩余段（抢占机制之外的双保险）。
+        _bg_start = time.monotonic()
         # 实际合成的文本：audio_text 为译文（翻译命中时）或剥离括号的原文；
         # 空则无正文可念（纯括号），跳过合成
         synth_text = audio_text if audio_text is not None else display_text
@@ -1209,6 +1223,9 @@ class CosyVoicePlugin(Star):
                     if len(segs) > 1:
                         sent_any = False
                         for i, seg in enumerate(segs):
+                            if time.monotonic() - _bg_start > 300:
+                                logger.warning("[cosyvoice] 后台任务超时（服务端积压>5分钟），放弃剩余段")
+                                break
                             # 语音文本由当前文字段【派生】（同一套分段，天然一一对应）：
                             # - skip_bracket_tts=True 时只剥离本段括号 → 语音不念括号、文字带括号；
                             # - 旧方案（文字按含括号原文分段、语音按无括号全文另切一套 vsegs）在括号
@@ -1308,6 +1325,9 @@ class CosyVoicePlugin(Star):
                                 logger.warning("[cosyvoice] 整条文字发送失败（已尝试补发）")
                         sent_any = False
                         async for _ch, wav in self.engine.iter_segment_items(synth_text, voice, pre_translated=True):
+                            if time.monotonic() - _bg_start > 300:
+                                logger.warning("[cosyvoice] 后台任务超时（服务端积压>5分钟），放弃剩余段")
+                                break
                             if wav:
                                 sent_any = True
                                 audio.schedule_cleanup(wav)
@@ -1347,6 +1367,9 @@ class CosyVoicePlugin(Star):
                     if seg_items:
                         sent_any = False
                         for orig, trans in seg_items:
+                            if time.monotonic() - _bg_start > 300:
+                                logger.warning("[cosyvoice] 后台任务超时（服务端积压>5分钟），放弃剩余段")
+                                break
                             if not _has_foreign(trans):
                                 # 纯中文段（去中文后无外文）：voice_only 也不发声
                                 continue
