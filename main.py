@@ -653,7 +653,9 @@ class CosyVoicePlugin(Star):
             await self.context.send_message(event.unified_msg_origin, chain)
             logger.info(f"[cosyvoice] 主动推送成功(context.send_message) 组件={types}")
             for _t in plain_texts:
-                self._sent_spoken_texts[_t] = time.time()
+                # 登记键与钩子查询键保持一致（去空白归一化），避免链上原文与净化后文本
+                # 因空白差异导致回环去重 miss、机器人消息被再次路由回来时重复合成。
+                self._sent_spoken_texts[re.sub(r"\s+", "", _t)] = time.time()
             return True
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[cosyvoice] context.send_message 失败（尝试 event.send）: {e}")
@@ -865,10 +867,13 @@ class CosyVoicePlugin(Star):
         # 路由回本钩子（event 的 origin 变为机器人自身、与用户 origin 不同），使原 message_id /
         # origin 级去重失效，出现「合成→推送→再合成」、每条回复念两遍。这里用「最近主动推送过的
         # 文本」拦截这类二次触发（60s 窗口；正常用户连发相同内容极少，且只是本次不念、影响可忽略）。
+        # 去重键：去掉全部空白后比较——同文本因换行/空格差异的重复触发也能命中
+        # （此前用原文精确匹配，两次触发文本只差一个空白就会漏掉而重复合成/发文字）。
+        full_key = re.sub(r"\s+", "", full_text)
         now = time.time()
         for _t in [k for k, ts in self._sent_spoken_texts.items() if ts < now - 60]:
             del self._sent_spoken_texts[_t]
-        if full_text and full_text in self._sent_spoken_texts:
+        if full_text and full_key in self._sent_spoken_texts:
             # 重复触发（框架把本插件主动推送的文字再路由回本钩子的回环）：文本已由
             # 首次触发安排语音/文字，这里除跳过合成外，还必须清掉结果链里的文字——
             # 否则提前 return 后链上 Plain 原样下发，管线会再发一遍，造成「文字重复」。
@@ -881,7 +886,7 @@ class CosyVoicePlugin(Star):
         # 直接跳过，避免重复打服务端、服务端过载、以及把偶发失败误报成「服务器失联」。
         origin = event.unified_msg_origin
         done = self._decorated.get(origin, set())
-        if full_text in done:
+        if full_key in done:
             # 重复触发（如 Agent 工具循环的中间轮/最终轮正文相同）：首次触发已安排
             # 语音与文字，这里跳过合成，且同样必须清链——去重检查在「移除链上 Plain」
             # 之前，不清链的话结果链文字会随管线再发一遍（用户日志里的「又重复了」即此因）。
@@ -998,7 +1003,7 @@ class CosyVoicePlugin(Star):
         mid = getattr(event, "message_id", None) or f"{origin}#{full_text}"
         if mid in self._spoken_msgs:
             return
-        self._decorated.setdefault(origin, set()).add(full_text)
+        self._decorated.setdefault(origin, set()).add(full_key)
         self._spoken_msgs.add(mid)
         task = asyncio.ensure_future(
             self._background_speak(
@@ -1050,7 +1055,7 @@ class CosyVoicePlugin(Star):
         if not synth_text.strip():
             logger.info("[cosyvoice] 正文仅含括号内容，跳过语音合成（括号内容已按模式单独发送）")
             self._mark_server_ok()
-            self._decorated.setdefault(origin, set()).add(display_text)
+            self._decorated.setdefault(origin, set()).add(re.sub(r"\s+", "", display_text))
             return
         logger.info(
             f"[cosyvoice] 后台合成开始 | send_mode={send_mode} merge={merge} "

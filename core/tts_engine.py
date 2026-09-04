@@ -42,6 +42,12 @@ _SYSTEM_CALL_RE = re.compile(
 # LLM 推理/元标记泄漏：<think>...</think> 及其自闭合/缺失闭合变体、</think> 残留等。
 # 这类标记若未被框架剥除，会以纯文本混入最终回复，应在合成/显示前剔除。
 _THINK_TAG_RE = re.compile(r"<think\b[^>]*>.*?</think>|<think\b[^>]*/?>|</think\s*>", re.I | re.S)
+# Markdown 围栏代码块（```...``` / ~~~...~~~）：代码念出来是噪音，整块剔除。
+_CODE_FENCE_RE = re.compile(r"```[\s\S]*?```|~~~[\s\S]*?~~~")
+# Markdown 行内代码（`...`）：命令/变量名念出来无意义，整块剔除。
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+# 残余的 HTML/XML 标签（<br/>、<span class="x"> 等）：剔除标签本身，保留标签外文本。
+_GENERIC_TAG_RE = re.compile(r"</?[A-Za-z][^>\n]*>")
 
 
 def _looks_like_tool_call(text: str, start: int) -> int:
@@ -105,10 +111,16 @@ def clean_media_placeholders(text: str) -> str:
 
 
 def clean_tts_text(text: str) -> str:
-    """回复文本综合净化：剔除媒体占位符标签 + LLM 工具调用序列化 + 系统调用/思考标记。"""
+    """回复文本综合净化：剔除代码块/行内代码 + 媒体占位符标签 + 工具调用序列化 + 系统调用/思考标记 + HTML 标签。"""
     if not text:
         return text
-    return clean_tool_calls(clean_media_placeholders(_THINK_TAG_RE.sub("", _SYSTEM_CALL_RE.sub("", text))))
+    t = _CODE_FENCE_RE.sub(" ", text)          # 围栏代码块整块剔除（先于标签清理，避免块内标签干扰）
+    t = _SYSTEM_CALL_RE.sub("", t)
+    t = _THINK_TAG_RE.sub("", t)
+    t = clean_media_placeholders(t)
+    t = _INLINE_CODE_RE.sub(" ", t)            # 行内代码剔除
+    t = _GENERIC_TAG_RE.sub(" ", t)            # 残余 HTML/XML 标签剔除（保留标签外文本）
+    return clean_tool_calls(t)
 
 
 def is_speakable(text: str) -> bool:
@@ -129,6 +141,10 @@ def is_speakable(text: str) -> bool:
     if t in ("[]", "{}", "null", "None", "nil", "undefined", "null"):
         return False
     if re.fullmatch(r"[\s\[\]\{\}\(\)\"']*", t):
+        return False
+    # 无任何可读字符（字母/数字/汉字/假名/谚文）→ 纯标点、纯符号、纯 emoji → 不合成，
+    # 否则服务端只会念出一段静音（用户看到的「空消息也送去转语音」即此类）。
+    if not re.search(r"[\w\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", t):
         return False
     return True
 
