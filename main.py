@@ -959,7 +959,10 @@ class CosyVoicePlugin(Star):
                         # 逐段分支的行为：语音=译文+副语言标签；文字=译文 + 换行 + 中文：原文（一条发出）。
                         seg_items = [(full_text, translated)]
 
-        if not text_in_chain:
+        # 图文消息（结果链含图片等媒体组件）：文字不再单独发送/补发，只发语音——
+        # 图片等媒体组件留在结果链随管线正常发出；语音失败时仍走回退逻辑补发文字兜底。
+        has_media = any(isinstance(c, Comp.Image) for c in chain)
+        if not text_in_chain or has_media:
             result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
         else:
             # 合并 both：结果链保留文字，改为按 translate_display_mode 展示
@@ -1009,7 +1012,7 @@ class CosyVoicePlugin(Star):
             self._background_speak(
                 event, display_text, full_text, voice, send_mode, merge, origin, text_in_chain,
                 audio_text=audio_text, seg_items=seg_items, bilingual=bilingual,
-                bracket_text=bracket_text,
+                bracket_text=bracket_text, no_text=has_media,
             )
         )
         # 避免「未等待的 Task 异常」警告刷屏
@@ -1029,7 +1032,7 @@ class CosyVoicePlugin(Star):
         self, event: AstrMessageEvent, display_text: str, full_text: str,
         voice, send_mode: str, merge: bool, origin: str, text_in_chain: bool = False,
         audio_text: str | None = None, seg_items: list | None = None,
-        bilingual: bool = False, bracket_text: str = "",
+        bilingual: bool = False, bracket_text: str = "", no_text: bool = False,
     ):
         """后台补发语音：不阻塞 on_decorating_result。
 
@@ -1038,6 +1041,7 @@ class CosyVoicePlugin(Star):
         - 合并 voice_only：文字已移除，只补发整条语音，失败回退补发文字；
         - 不合并 both：文字已移除，先整条发「译文+换行+原文：」文字、再逐段发译文语音；
         - 不合并 voice_only：文字已移除，逐段只发语音，失败回退补发文字。
+        - no_text=True（图文消息）：只发语音，所有文字发送/补发一律跳过（图片随结果链发出）。
 
         bracket_text：skip_bracket_tts 生效时从原文提取的括号内容。逐段模式下分段是在
         「剥离括号后的文本」上做的，故正文任意一段都不含括号，括号内容在正文各段发完后
@@ -1115,11 +1119,11 @@ class CosyVoicePlugin(Star):
                             else:
                                 # 本段无外文可读（纯中文）：仅发文字、不发声
                                 logger.debug("[cosyvoice] 本段无外文，仅发文字（跳过语音）")
-                            if not await self._realtime_send(event, [Comp.Plain(disp)]):
+                            if not no_text and not await self._realtime_send(event, [Comp.Plain(disp)]):
                                 logger.warning("[cosyvoice] 分段文字发送失败（已尝试补发）")
                         else:
                             # 先文字后语音（原行为）
-                            if not await self._realtime_send(event, [Comp.Plain(disp)]):
+                            if not no_text and not await self._realtime_send(event, [Comp.Plain(disp)]):
                                 logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
                             if _has_foreign(trans):
                                 wav = await self.engine.synthesize(trans_voiced, voice, pre_translated=True)
@@ -1206,18 +1210,20 @@ class CosyVoicePlugin(Star):
                                         f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
                                     )
                                 # 纯括号段（无语音文本）：只发文字，不合成、不告警
-                                try:
-                                    if not await self._realtime_send(event, [Comp.Plain(seg)]):
-                                        logger.warning("[cosyvoice] 分段文字发送失败（已尝试补发）")
-                                except Exception as e:  # noqa: BLE001
-                                    logger.warning(f"[cosyvoice] 分段文字发送异常（跳过）: {e}")
+                                if not no_text:
+                                    try:
+                                        if not await self._realtime_send(event, [Comp.Plain(seg)]):
+                                            logger.warning("[cosyvoice] 分段文字发送失败（已尝试补发）")
+                                    except Exception as e:  # noqa: BLE001
+                                        logger.warning(f"[cosyvoice] 分段文字发送异常（跳过）: {e}")
                             else:
                                 # 先文字后语音（原行为）
-                                try:
-                                    if not await self._realtime_send(event, [Comp.Plain(seg)]):
-                                        logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
-                                except Exception as e:  # noqa: BLE001
-                                    logger.warning(f"[cosyvoice] 分段文字发送异常（跳过）: {e}")
+                                if not no_text:
+                                    try:
+                                        if not await self._realtime_send(event, [Comp.Plain(seg)]):
+                                            logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
+                                    except Exception as e:  # noqa: BLE001
+                                        logger.warning(f"[cosyvoice] 分段文字发送异常（跳过）: {e}")
                                 wav = (
                                     await self.engine.synthesize(seg_audio, voice, pre_translated=True)
                                     if seg_has_voice else None
@@ -1259,7 +1265,7 @@ class CosyVoicePlugin(Star):
                         # 单行（无换行/句末标点分段）：语音按 synth_text（已剥离括号）逐段合成；
                         # 文字整条发「含括号的原文」display_text（用户要看到括号，不再逐段剥括号）。
                         text_plain = Comp.Plain(display_text)
-                        if not text_after_voice:
+                        if not text_after_voice and not no_text:
                             # 先文字后语音：先发整条带括号文字
                             if not await self._realtime_send(event, [text_plain]):
                                 logger.warning("[cosyvoice] 整条文字发送失败（已尝试补发）")
@@ -1277,7 +1283,7 @@ class CosyVoicePlugin(Star):
                                     f"[cosyvoice] 分段语音合成失败（跳过该段）: "
                                     f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
                                 )
-                        if text_after_voice:
+                        if text_after_voice and not no_text:
                             # 先语音后文字：语音发完后发整条带括号文字
                             if not await self._realtime_send(event, [text_plain]):
                                 logger.warning("[cosyvoice] 整条文字发送失败（已尝试补发）")
