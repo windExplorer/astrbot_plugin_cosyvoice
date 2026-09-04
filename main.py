@@ -823,6 +823,10 @@ class CosyVoicePlugin(Star):
         result = event.get_result()
         chain = result.chain
         if not chain:
+            # 链为空：本条无正文可转。清掉 LLM 原文残留——否则下一条「链文本无效」的
+            # 非 LLM 消息（其他插件固定文案等）会命中 fallback、把残留原文误转语音。
+            # 工具循环中间态清掉也无妨：on_llm_response 在 agent 跑完时会重新写入。
+            self._clear(event, clear_llm=True)
             return
 
         # 抽取纯文本（先综合净化：剔除媒体占位符标签 <pc_history_media images="1" />
@@ -840,6 +844,8 @@ class CosyVoicePlugin(Star):
                 logger.debug("[cosyvoice] 结果链文本无效，回退使用本轮模型原文合成语音")
                 full_text = fb
             else:
+                # 链文本与 LLM 原文都无效：本条不转。同样清理残留，防止污染下一轮 fallback
+                self._clear(event, clear_llm=True)
                 return
 
         # 已含语音则不重复
