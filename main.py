@@ -172,6 +172,11 @@ class CosyVoicePlugin(Star):
         # 消息重复触发（streaming / 工具循环 / 私聊 reaction 链路），用 message_id 精确拦截重复，
         # 不影响「同一会话的连续两条不同消息」（message_id 不同），比 origin 级去重更稳。
         self._spoken_msgs: set = set()
+        # 防上游重试刷屏：上游（LLM 提供方）连接不稳会对同一条回复反复重试，每次重试是
+        # 新事件（message_id 不同）+ 重新生成的内容（开头相似、细节不同），message_id 级与
+        # 文本精确去重都拦不住。记录每会话最近一次处理的文本键，短时间窗内公共前缀足够长
+        # 即视为重试、拦截（见 on_decorating_result）。
+        self._recent_texts: dict = {}  # origin -> (ts, full_key)
         # 会话级语音开关（按群持久记忆）：unified_msg_origin -> True
         data_dir = self._data_dir()
         self._session_file = os.path.join(data_dir, "tts_sessions.json")
@@ -877,8 +882,8 @@ class CosyVoicePlugin(Star):
             # 重复触发（框架把本插件主动推送的文字再路由回本钩子的回环）：文本已由
             # 首次触发安排语音/文字，这里除跳过合成外，还必须清掉结果链里的文字——
             # 否则提前 return 后链上 Plain 原样下发，管线会再发一遍，造成「文字重复」。
-            if not text_in_chain:
-                result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
+            # 无论合并/逐段模式一律清链：文本已发过，链上再发就是重复。
+            result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
             logger.info("[cosyvoice] 重复触发（主动推送回环）：跳过合成并移除链上文字，避免重复发送")
             return
 
@@ -890,10 +895,28 @@ class CosyVoicePlugin(Star):
             # 重复触发（如 Agent 工具循环的中间轮/最终轮正文相同）：首次触发已安排
             # 语音与文字，这里跳过合成，且同样必须清链——去重检查在「移除链上 Plain」
             # 之前，不清链的话结果链文字会随管线再发一遍（用户日志里的「又重复了」即此因）。
-            if not text_in_chain:
-                result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
+            result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
             logger.info("[cosyvoice] 重复触发（文本已处理）：跳过合成并移除链上文字，避免重复发送")
             return
+
+        # 防上游重试刷屏：上游（LLM 提供方）连接不稳会对同一条回复反复重试，每次重试是
+        # 新事件（message_id 不同）+ 重新生成的内容（开头相似、细节不同），上面两道
+        # 精确去重都拦不住——逐条转语音+发文字即表现为「一直重复发消息」。
+        # 同一会话 20s 内、与最近处理文本公共前缀 ≥ 20 字 → 视为重试，拦截并清链。
+        prev = self._recent_texts.get(origin)
+        if prev is not None and now - prev[0] <= 20:
+            common = 0
+            for a, b in zip(prev[1], full_key):
+                if a != b:
+                    break
+                common += 1
+            if common >= 20:
+                result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
+                logger.warning(
+                    f"[cosyvoice] 疑似上游重试（{common} 字公共前缀、间隔 {now - prev[0]:.1f}s）："
+                    "跳过合成并移除链上文字，避免重复刷屏"
+                )
+                return
 
         voice_name, _, _ = self.engine.resolve_voice(voice)
 
@@ -1015,6 +1038,7 @@ class CosyVoicePlugin(Star):
             return
         self._decorated.setdefault(origin, set()).add(full_key)
         self._spoken_msgs.add(mid)
+        self._recent_texts[origin] = (now, full_key)
         task = asyncio.ensure_future(
             self._background_speak(
                 event, display_text, full_text, voice, send_mode, merge, origin, text_in_chain,
