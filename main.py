@@ -301,7 +301,7 @@ class CosyVoicePlugin(Star):
 
     async def _enter_cooldown(
         self, event: AstrMessageEvent, send_mode: str, full_text: str,
-        tip: str = SERVER_DOWN_TIP, text_in_chain: bool = False,
+        tip: str = SERVER_DOWN_TIP, text_in_chain: bool = False, fallback: bool = True,
     ):
         """合成失败：进冷却 + 发一次性提示 + 回退文字（文字已从结果链移除时才补发）。
 
@@ -310,6 +310,8 @@ class CosyVoicePlugin(Star):
           默认提示为失联文案（SERVER_DOWN_TIP）；繁忙（排队过长）场景传入 SERVER_BUSY_TIP。
         - text_in_chain=False（文字已从结果链移除，如 voice_only / 不合并 both）时
           把文字补发回去，避免前端静默；True（合并 both 文字已在结果链）则跳过。
+        - fallback=False：调用方已自行发出过文字（如逐段发送时「语音失败也补发该段文字」），
+          跳过回退补发——否则同一段文字会被发两遍（服务端故障路径的双重补发即此因）。
         """
         logger.info(
             f"[cosyvoice] 进入冷却 | send_mode={send_mode} text_in_chain={text_in_chain}"
@@ -325,7 +327,8 @@ class CosyVoicePlugin(Star):
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[cosyvoice] 失联提示发送失败: {e}")
-        await self._fallback_text(event, full_text, send_mode, text_in_chain)
+        if fallback:
+            await self._fallback_text(event, full_text, send_mode, text_in_chain)
 
 
     # ---------- 会话级语音开关（按群持久记忆） ----------
@@ -1145,6 +1148,7 @@ class CosyVoicePlugin(Star):
                     # 文本随语音分段、且原文/译文一一对应（分段在原文侧，语义对齐可靠）
                     tmode = (self.config.get("translate_display_mode") or "both").strip().lower()
                     sent_any = False
+                    text_sent = False  # 文字是否已发出（语音失败也补发文字）——已发则冷却回退不再补发
                     for orig, trans in seg_items:
                         disp = trans if tmode == "translated" else (orig if bilingual else (f"{trans}\n中文：{orig}" if trans != orig else orig))
                         # 仅语音文本注入标记（换气/音效）；展示文字 disp 不带标记
@@ -1170,12 +1174,16 @@ class CosyVoicePlugin(Star):
                             else:
                                 # 本段无外文可读（纯中文）：仅发文字、不发声
                                 logger.debug("[cosyvoice] 本段无外文，仅发文字（跳过语音）")
-                            if not no_text and not await self._realtime_send(event, [Comp.Plain(disp)]):
-                                logger.warning("[cosyvoice] 分段文字发送失败（已尝试补发）")
+                            if not no_text:
+                                text_sent = True
+                                if not await self._realtime_send(event, [Comp.Plain(disp)]):
+                                    logger.warning("[cosyvoice] 分段文字发送失败（已尝试补发）")
                         else:
                             # 先文字后语音（原行为）
-                            if not no_text and not await self._realtime_send(event, [Comp.Plain(disp)]):
-                                logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
+                            if not no_text:
+                                text_sent = True
+                                if not await self._realtime_send(event, [Comp.Plain(disp)]):
+                                    logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
                             if _has_foreign(trans):
                                 wav = await self.engine.synthesize(trans_voiced, voice, pre_translated=True)
                                 if wav:
@@ -1196,8 +1204,10 @@ class CosyVoicePlugin(Star):
                         # 仅服务端故障才冷却，配置/内容类失败不冷却（理由见下方逐段分支）
                         if getattr(self.engine, "last_failure_kind", "server") == "server":
                             logger.warning("[cosyvoice] 后台合成失败（服务端故障），进入冷却并回退文字")
+                            # 文字已随逐段补发发出（text_sent）时不再回退补发整条，避免同文重复
                             await self._enter_cooldown(
-                                event, send_mode, display_text, text_in_chain=text_in_chain
+                                event, send_mode, display_text, text_in_chain=text_in_chain,
+                                fallback=not text_sent,
                             )
                         else:
                             logger.warning(
@@ -1222,6 +1232,7 @@ class CosyVoicePlugin(Star):
                     logger.info(f"[cosyvoice] 文字分段 | 段数={len(segs)} 明细: {seg_preview}")
                     if len(segs) > 1:
                         sent_any = False
+                        text_sent = False  # 文字是否已发出（逐段补发）——已发则冷却回退不再补发
                         for i, seg in enumerate(segs):
                             if time.monotonic() - _bg_start > 300:
                                 logger.warning("[cosyvoice] 后台任务超时（服务端积压>5分钟），放弃剩余段")
@@ -1265,6 +1276,7 @@ class CosyVoicePlugin(Star):
                                     )
                                 # 纯括号段（无语音文本）：只发文字，不合成、不告警
                                 if not no_text:
+                                    text_sent = True
                                     try:
                                         if not await self._realtime_send(event, [Comp.Plain(seg)]):
                                             logger.warning("[cosyvoice] 分段文字发送失败（已尝试补发）")
@@ -1273,6 +1285,7 @@ class CosyVoicePlugin(Star):
                             else:
                                 # 先文字后语音（原行为）
                                 if not no_text:
+                                    text_sent = True
                                     try:
                                         if not await self._realtime_send(event, [Comp.Plain(seg)]):
                                             logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
@@ -1302,8 +1315,10 @@ class CosyVoicePlugin(Star):
                             # 静默停发语音 30s，还给出误导性的失联提示。
                             if getattr(self.engine, "last_failure_kind", "server") == "server":
                                 logger.warning("[cosyvoice] 后台合成失败（服务端故障），进入冷却并回退文字")
+                                # 文字已随逐段补发发出（text_sent）时不再回退补发整条，避免同文重复
                                 await self._enter_cooldown(
-                                    event, send_mode, display_text, text_in_chain=text_in_chain
+                                    event, send_mode, display_text, text_in_chain=text_in_chain,
+                                    fallback=not text_sent,
                                 )
                             else:
                                 logger.warning(
@@ -1319,8 +1334,10 @@ class CosyVoicePlugin(Star):
                         # 单行（无换行/句末标点分段）：语音按 synth_text（已剥离括号）逐段合成；
                         # 文字整条发「含括号的原文」display_text（用户要看到括号，不再逐段剥括号）。
                         text_plain = Comp.Plain(display_text)
+                        text_sent = False  # 文字是否已发出——已发则冷却回退不再补发（防服务端故障路径双重补发）
                         if not text_after_voice and not no_text:
                             # 先文字后语音：先发整条带括号文字
+                            text_sent = True
                             if not await self._realtime_send(event, [text_plain]):
                                 logger.warning("[cosyvoice] 整条文字发送失败（已尝试补发）")
                         sent_any = False
@@ -1340,8 +1357,9 @@ class CosyVoicePlugin(Star):
                                     f"[cosyvoice] 分段语音合成失败（跳过该段）: "
                                     f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
                                 )
-                        if text_after_voice and not no_text:
+                        if text_after_voice and not no_text and not text_sent:
                             # 先语音后文字：语音发完后发整条带括号文字
+                            text_sent = True
                             if not await self._realtime_send(event, [text_plain]):
                                 logger.warning("[cosyvoice] 整条文字发送失败（已尝试补发）")
                         if not sent_any:
@@ -1351,8 +1369,10 @@ class CosyVoicePlugin(Star):
                             # 静默停发语音 30s，还给出误导性的失联提示。
                             if getattr(self.engine, "last_failure_kind", "server") == "server":
                                 logger.warning("[cosyvoice] 后台合成失败（服务端故障），进入冷却并回退文字")
+                                # 文字已随上一步发出（text_sent）时不再回退补发，避免同文重复
                                 await self._enter_cooldown(
-                                    event, send_mode, display_text, text_in_chain=text_in_chain
+                                    event, send_mode, display_text, text_in_chain=text_in_chain,
+                                    fallback=not text_sent,
                                 )
                             else:
                                 logger.warning(

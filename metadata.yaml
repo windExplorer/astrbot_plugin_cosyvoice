@@ -1,7 +1,7 @@
 name: astrbot_plugin_cosyvoice # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
 display_name: CosyVoice3 语音合成 # 用于展示的名字
 desc: 接入本地 CosyVoice3 推理服务，让机器人以可配置音色朗读回复（支持 LLM 工具、/tts 指令与关键词触发）。 # 插件简短描述
-version: v2.1.43 # 插件版本号
+version: v2.1.44 # 插件版本号
 author: Yours # 作者
 repo: https://github.com/AstrBotDevs/AstrBot # 插件的仓库地址（请替换为你的仓库）
 
