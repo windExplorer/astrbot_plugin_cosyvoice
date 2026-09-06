@@ -36,7 +36,7 @@ try:  # 仅用于类型标注，缺失也不影响运行
 except Exception:  # noqa: BLE001
     LLMResponse = object  # type: ignore
 
-from .core.tts_engine import TtsEngine, is_speakable, clean_media_placeholders, clean_tts_text
+from .core.tts_engine import TtsEngine, is_speakable, clean_media_placeholders, clean_tts_text, is_error_text
 from .core.markup import inject_markup, MARKUP_WHITELIST_RE
 from .core.webapi import register_web_apis
 from .core.translator import Translator
@@ -853,6 +853,13 @@ class CosyVoicePlugin(Star):
                 # 链文本与 LLM 原文都无效：本条不转。同样清理残留，防止污染下一轮 fallback
                 self._clear(event, clear_llm=True)
                 return
+
+        # 上游/框架错误回显（LLM 提供方 429 限流、超时、Traceback 等被塞进回复链）：
+        # 不转语音——bot 念「错误代码 429 / 请求id xxx」毫无意义；文字照常由管线发送，插件不吞内容。
+        if is_error_text(full_text):
+            logger.info("[cosyvoice] 错误类文本（上游异常回显），跳过语音合成")
+            self._clear(event, clear_llm=True)
+            return
 
         # 已含语音则不重复
         if any(isinstance(c, Comp.Record) for c in chain):

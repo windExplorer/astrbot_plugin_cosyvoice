@@ -153,6 +153,24 @@ def is_speakable(text: str) -> bool:
     return True
 
 
+# 上游/框架错误回显特征：LLM 提供方限流、超时、Traceback 等被塞进回复链时携带的标记。
+# 这类文本不该转语音——bot 念「错误代码 429 / 请求id xxx」毫无意义。
+_ERROR_TEXT_RE = re.compile(
+    r"RateLimitError|APIError|AuthenticationError|TimeoutError|ConnectionError"
+    r"|InternalServerError|BadRequestError|PermissionDeniedError"
+    r"|错误代码[:：]\s*\d{3}|错误类型[:：]|错误消息[:：]|请求id[:：]|请求ID[:：]"
+    r"|Traceback \(most recent call last\)|HTTP/\d\.\d\s+\d{3}",
+    re.I,
+)
+
+
+def is_error_text(text: str) -> bool:
+    """判断文本是否为上游/框架的错误回显（429 限流、超时、Traceback 等）。"""
+    if not text:
+        return False
+    return bool(_ERROR_TEXT_RE.search(text))
+
+
 class TtsEngine:
     def __init__(self, config: dict, client: CosyVoiceClient, translator=None, concurrency: int = 1):
         self.config = config
