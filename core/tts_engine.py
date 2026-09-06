@@ -461,10 +461,13 @@ class TtsEngine:
                     start = cut
                 else:
                     mode = self._seg_nopunct_mode("first" if is_first else "body")
-                    if mode == "seek":
+                    # seek 模式受 hard_cap 约束：剩余长度或 seek 目标超出硬上限时放弃 seek，
+                    # 退回 truncate 硬切——否则无标点长文（错误信息/英文等）会 seek 出
+                    # 远超配置窗口的超长段
+                    if mode == "seek" and not (hard_cap > 0 and n - start > hard_cap):
                         # 窗口内无标点：往后（超出窗口）找第一个命中的分段符号
                         nxt = punct_re.search(text, end)
-                        if nxt is not None:
+                        if nxt is not None and not (hard_cap > 0 and nxt.end() - start > hard_cap):
                             cut = nxt.end()
                             seg = text[start:cut].strip()
                             if seg:
@@ -486,41 +489,48 @@ class TtsEngine:
                 is_first = False
 
         # 短段合并：任何 < lo 字的段并入相邻段（优先并入前一段，首段并入后一段）。
-        # lo=0 时退化为不合并（保持原分段）。同时剔除空段。
-        return self._merge_short(chunks, lo)
+        # lo=0 时退化为不合并（保持原分段）。合并结果受窗口上界 hi 约束——
+        # 否则长段吸附短段越滚越大，滚出远超配置窗口的超长段。同时剔除空段。
+        return self._merge_short(chunks, lo, hi)
 
     def _split_by_newline(self) -> bool:
         """配置项 split_by_newline：是否优先按换行预分段（默认开启，QQ 多行消息用）。"""
         return bool(self.config.get("split_by_newline", True))
 
     @staticmethod
-    def _merge_short(chunks: list, min_len: int) -> list:
-        """把 < min_len 字的短段并入相邻段，避免「哈哈。」这类超短句单独成段。"""
+    def _merge_short(chunks: list, min_len: int, max_len: int = 0) -> list:
+        """把 < min_len 字的短段并入相邻段，避免「哈哈。」这类超短句单独成段。
+
+        max_len > 0 时为合并结果设上限：并入会使结果超过 max_len 则放弃合并、保持独立段。
+        否则长段会不断吸附 <min_len 的短段越滚越大，滚出远超配置窗口的 100+ 字超长段
+        （用户配置每段 50/60 却出现 100+ 字语音任务的根因）。
+        """
         if min_len <= 0:
             return [c for c in chunks if c]
+        cap = max_len if max_len and max_len > 0 else 0
         out: list = []
         for c in chunks:
             c = (c or "").strip()
             if not c:
                 continue
             if not out:
-                # 首段：若太短则暂存，等待并入下一段（无论下一段长短）
-                if len(c) < min_len:
-                    out.append(c)
-                else:
-                    out.append(c)
+                # 首段直接保留；偏短时等下一段合并（由下方 prev < min_len 分支处理）
+                out.append(c)
             else:
                 prev = out[-1]
-                if len(prev) < min_len or len(c) < min_len:
-                    # 前一段或本段偏短：合并，避免「哈哈。」这类孤立短段
+                if (len(prev) < min_len or len(c) < min_len) and (
+                    cap <= 0 or len(prev) + len(c) <= cap
+                ):
+                    # 前一段或本段偏短：合并，避免「哈哈。」这类孤立短段（受 cap 上限约束）
                     out[-1] = prev + c
                 else:
                     out.append(c)
-        # 若末段仍短于 min_len（后面没段可并），并入前一段
+        # 若末段仍短于 min_len（后面没段可并），并入前一段（同样受 cap 上限约束）
         if len(out) >= 2 and len(out[-1]) < min_len:
-            out[-2] = out[-2] + out[-1]
-            out.pop()
-        return out
+            if cap <= 0 or len(out[-2]) + len(out[-1]) <= cap:
+                out[-2] = out[-2] + out[-1]
+                out.pop()
+        return [c for c in out if c]
 
     def _legacy_split(self, text: str) -> list:
         """旧分段逻辑（segment_len 关闭时回退）：按句边界切，超 max_text_len 则硬切。"""
