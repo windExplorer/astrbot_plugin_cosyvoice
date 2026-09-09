@@ -119,6 +119,14 @@ SERVER_DOWN_TIP = "🎙️（语音服务器失联了，可以稍后再试或联
 # 语音服务器繁忙（排队位置超过阈值 tts_queue_max_position）时给用户的提示
 SERVER_BUSY_TIP = "🎙️（语音服务器正忙，排队的消息有点多，可以稍后再试，文字照常发送）"
 
+# _last_llm（本轮模型原文）的有效期（秒）：超期即视为失效。
+# 用于兜底 _clear 清不干净的场景——bot 用 context.send_message 主动推送的消息会被
+# 框架回环路由回 on_decorating_result，此时 event 的 unified_msg_origin 是 bot 自身，
+# 与 on_llm_response 写入时用的「用户 origin」不一致，导致 _clear(clear_llm=True)
+# 清不掉用户 origin 的残留。残留会让 _should_tts 的 llm_recorded 一直为真，把后续
+# 非 LLM 消息（其他插件文案等）误判成大模型回复转语音。加时效即可自愈。
+LAST_LLM_TTL = 120.0
+
 
 @register(PLUGIN_ID, "Yours", "接入本地 CosyVoice3，让机器人以可配置音色朗读回复", "1.0.0")
 class CosyVoicePlugin(Star):
@@ -150,7 +158,8 @@ class CosyVoicePlugin(Star):
         )
         # 每个消息的事件标记（避免并发串台），以 message_id 为键
         self._flags: dict = {}
-        # 本轮模型生成的原文（按会话），用于「结果链文本无效」时回退合成
+        # 本轮模型生成的原文（按会话），用于「结果链文本无效」时回退合成。
+        # 值为 (写入时间戳, 文本)，读写一律走 _set_last_llm / _get_last_llm（带时效校验）。
         self._last_llm: dict = {}
         # 本轮用户原始消息（按会话），供「用户要求用文字回复」的抑制判定跨钩子使用，
         # 避免 on_decorating_result 阶段 message_str 已不可用时漏判 text_keywords。
@@ -267,6 +276,29 @@ class CosyVoicePlugin(Star):
             origin = event.unified_msg_origin
             self._last_llm.pop(origin, None)
             self._last_user_msg.pop(origin, None)
+
+    # ---------- _last_llm 读写（统一带时效，见 LAST_LLM_TTL） ----------
+    def _set_last_llm(self, origin: str, text: str) -> None:
+        """记录本轮模型原文（附带时间戳，供 _get_last_llm 做时效校验）。"""
+        self._last_llm[origin] = (time.time(), text or "")
+
+    def _get_last_llm(self, origin: str, max_age: float = LAST_LLM_TTL) -> str:
+        """读取本轮模型原文；距写入超过 max_age 秒即视为失效并丢弃。
+
+        _clear(clear_llm=True) 只能清「当前 event 的 origin」，而 bot 用
+        context.send_message 主动推送的消息被框架回环路由回 on_decorating_result 时，
+        event 的 unified_msg_origin 是 bot 自身，与 on_llm_response 写入时用的用户
+        origin 不一致 → 残留永远清不掉。这里用时效兜底，保证残留不会无限期地
+        污染后续轮次（把非 LLM 消息误判成大模型回复转语音）。
+        """
+        item = self._last_llm.get(origin)
+        if not item:
+            return ""
+        ts, text = item
+        if time.time() - ts > max_age:
+            self._last_llm.pop(origin, None)
+            return ""
+        return text or ""
 
     def _push_event(self, ok: bool, msg: str):
         """记录一条『最近事件』（进程内环形缓冲，供 WebUI 概览展示）。
@@ -599,7 +631,7 @@ class CosyVoicePlugin(Star):
             # 绝不使用「上一轮残留的 _last_llm」——否则同会话里其他插件的固定文案
             # （非大模型消息）也会被误转语音。
             llm_this_round = self._get_flag(event, "llm_this_round", False)
-            llm_recorded = bool(self._last_llm.get(event.unified_msg_origin))
+            llm_recorded = bool(self._get_last_llm(event.unified_msg_origin))
             # 4) 结果链自身的 LLM_RESULT 标记（覆盖 Agent 工具循环的中间轮）——
             #    上面三个依据都依赖 on_llm_response，而它只在 agent 跑完时触发一次，
             #    工具循环里模型「边说边调工具」的正文不会触发，必须靠这里兜住。
@@ -715,7 +747,7 @@ class CosyVoicePlugin(Star):
                 "跳过写入 _last_llm"
             )
         else:
-            self._last_llm[event.unified_msg_origin] = clean_text
+            self._set_last_llm(event.unified_msg_origin, clean_text)
 
         cfg = self.config
 
@@ -845,7 +877,7 @@ class CosyVoicePlugin(Star):
         full_text = "".join(texts).strip()
         if not is_speakable(full_text):
             # 结果链文本无效（空 / [] 占位符等）：回退用本轮模型原文合成（同样净化）
-            fb = clean_tts_text(self._last_llm.get(event.unified_msg_origin, ""))
+            fb = clean_tts_text(self._get_last_llm(event.unified_msg_origin))
             if is_speakable(fb):
                 logger.debug("[cosyvoice] 结果链文本无效，回退使用本轮模型原文合成语音")
                 full_text = fb
@@ -1740,7 +1772,7 @@ class CosyVoicePlugin(Star):
             self._sendmodes[origin] = "voice_only"
             self._save_sendmodes()
             yield event.plain_result(
-                "好嘞，这个聊天以后只发语音～（文字仍会写入会话上下文，AI 不会失忆；"
+                "好嘞，这个聊天以后只发语音～（只发语音时聊天记录里就只有语音了；"
                 "/tts_type -1 可恢复跟随全局）"
             )
         else:
@@ -1874,7 +1906,7 @@ class CosyVoicePlugin(Star):
 
         if not is_speakable(text):
             # 模型可能没把正文放进 text 参数（如传入 [] 占位符），回退用本轮模型原文
-            fb = clean_tts_text(self._last_llm.get(event.unified_msg_origin, ""))
+            fb = clean_tts_text(self._get_last_llm(event.unified_msg_origin))
             if is_speakable(fb):
                 text = fb
             else:

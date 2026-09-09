@@ -2,6 +2,18 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.1.47 (2026-09-09)
+
+- fix/perf: 代码审查 P0 六项修复（完整审查报告见 `docs/REVIEW_2026-09-09.md`）。
+  - fix: 修复多服务端配置热更时旧 httpx 连接池泄漏——`router._rebuild` 里同步调用了 async 的 `client.close()`（未 await），只创建协程对象而不执行，旧连接池永不关闭且必刷 "coroutine was never awaited" 警告；改为在事件循环中以任务形式真正 await 关闭。
+  - fix: 移除从未实现的死配置 `tts_context_hint`（`metadata.yaml` 与 `_conf_schema.json` 同步删除），并修正 `/tts_type 0` 中「文字仍会写入会话上下文，AI 不会失忆」的虚假文案。
+  - fix: `_last_llm` 增加时效校验（`LAST_LLM_TTL`=120s）——bot 主动推送被框架回环路由回 `on_decorating_result` 时 event 的 origin 是 bot 自身，与 `on_llm_response` 写入时用的用户 origin 不一致，`_clear` 清不掉该残留；残留会让 `_should_tts` 的 `llm_recorded` 一直为真，把后续非 LLM 消息（其他插件文案等）误判成大模型回复转语音。
+  - fix: 译文缓存改为有上限的 LRU（上限 512 条）——原为无界 dict、仅在配置热更时清空，长期运行内存持续增长。
+  - perf: 缓存参考音频字节（按 路径+mtime+大小 做 key），长回复逐段合成时不再反复读同一个数 MB 的参考音频文件。
+  - fix: WebUI 试听预览文件按数量清理（保留最近 20 个）——原先 `data/previews/` 只写不删，随试听次数无限增长。
+- docs: 新增 `docs/REVIEW_2026-09-09.md` 整体代码审查报告（P0/P1/P2 问题清单、行号定位与四阶段落地路线图）。
+- 版本 v2.1.46 -> v2.1.47。
+
 ## v2.1.46 (2026-09-07)
 
 - fix: 修复「配置了每段 50/60 却出现 100+ 字语音任务」的分段失控。

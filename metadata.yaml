@@ -1,7 +1,7 @@
 name: astrbot_plugin_cosyvoice # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
 display_name: CosyVoice3 语音合成 # 用于展示的名字
 desc: 接入本地 CosyVoice3 推理服务，让机器人以可配置音色朗读回复（支持 LLM 工具、/tts 指令与关键词触发）。 # 插件简短描述
-version: v2.1.46 # 插件版本号
+version: v2.1.47 # 插件版本号
 author: Yours # 作者
 repo: https://github.com/AstrBotDevs/AstrBot # 插件的仓库地址（请替换为你的仓库）
 
@@ -256,12 +256,6 @@ config:
     description: 分段回复是否合并为单条语音发送
     hint: false=不合并：服务端每返回一段语音就立即发一段（流式、多条独立语音消息）；true=合并：全部段生成完后拼接成一个音频再发。默认 false。
     default: false
-  - key: tts_context_hint
-    type: bool
-    title: 语音后回写上下文
-    description: 发语音成功后，把本轮内容补回会话上下文，避免 AI 下一轮“不知道自己发了语音/丢了那轮内容”
-    hint: 默认 true。开启后：voice_only 模式会把本轮文字补回结果链（否则历史可能为空导致 AI 失忆）；both 模式追加一条“🎙️（以上已用语音播报）”标记让 AI 明确上一轮是语音。关闭则完全不发额外文字。
-    default: true
   - key: tts_concurrency
     type: int
     title: TTS 服务端并发上限

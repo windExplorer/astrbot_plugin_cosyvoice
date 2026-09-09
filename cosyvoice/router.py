@@ -119,11 +119,7 @@ class CosyVoiceRouter:
                 }
             )
         # 关闭旧的未复用 client（配置变更时避免连接泄漏）
-        for old in self._nodes:
-            try:
-                old["client"].close()
-            except Exception:  # noqa: BLE001
-                pass
+        self._close_nodes(self._nodes)
         self._nodes = nodes
         defaults = [n["url"] for n in nodes if n["default"]]
         logger.info(
@@ -131,6 +127,32 @@ class CosyVoiceRouter:
             + ", ".join(f"{n['url']}(w={n['weight']})" for n in nodes)
             + (f" | 默认节点: {defaults}" if defaults else "")
         )
+
+    @staticmethod
+    def _close_nodes(nodes: list) -> None:
+        """关闭一批节点的底层 httpx 客户端。
+
+        client.close() 是 async：同步调用只会创建协程对象而不执行——旧连接池永不
+        关闭，还会刷 "coroutine was never awaited" 警告。必须在事件循环中以任务
+        形式真正 await 关闭。
+
+        无运行中事件循环时（如插件 __init__ 首次构建）直接跳过：首次构建时
+        self._nodes 为空，本就无旧连接可关，不影响正确性。
+        """
+        if not nodes:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        for old in nodes:
+            client = old.get("client") if isinstance(old, dict) else None
+            if client is None:
+                continue
+            try:
+                loop.create_task(client.close())
+            except Exception:  # noqa: BLE001
+                pass
 
     def update_servers(
         self,

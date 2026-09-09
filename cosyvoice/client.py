@@ -15,6 +15,10 @@ from astrbot.api import logger
 
 from ..utils import audio
 
+# 参考音频字节缓存的最大条目数：每个条目可能数 MB，故上限刻意设得很小，
+# 仅用于避免「长回复逐段合成」时反复读同一个参考音频文件。
+_WAV_CACHE_MAX = 4
+
 
 def _looks_polluted(text: str) -> bool:
     """判断参考文本是否疑似被 LLM / 系统提示污染。
@@ -97,6 +101,10 @@ class CosyVoiceClient:
         self._queue_max_position = int(queue_max_position or 0)
         self.cache_dir = cache_dir
         self._sr_fetched = False
+        # 参考音频字节缓存：key=(路径, mtime_ns, 大小) -> bytes。
+        # 长回复会按段多次调用 synthesize，若无缓存则同一份（可能数 MB 的）参考音频
+        # 会被反复读取数十次；用 mtime/大小做 key，文件更新后自动失效。
+        self._wav_cache: dict = {}
         # 复用单一 httpx 客户端（含连接池）：避免每次请求创建/销毁 AsyncClient。
         # 多段合成时共用同一个连接池，消除 TIME_WAIT 积累和间歇性连接重建带来的
         # ReadError / RemoteProtocolError 等低概率网络层故障。
@@ -161,8 +169,7 @@ class CosyVoiceClient:
             elif prompt_wav:
                 if not os.path.exists(prompt_wav):
                     raise FileNotFoundError(f"参考音频不存在: {prompt_wav}")
-                with open(prompt_wav, "rb") as f:
-                    wav_bytes = f.read()
+                wav_bytes = self._read_wav_cached(prompt_wav)
                 wav_name = os.path.basename(prompt_wav)
             else:
                 raise ValueError("未提供参考音频（prompt_wav 或 prompt_wav_path 至少其一）")
@@ -265,6 +272,30 @@ class CosyVoiceClient:
             raise RuntimeError("[cosyvoice] 合成失败（未知错误）")
 
         return pcm
+
+    def _read_wav_cached(self, path: str) -> bytes:
+        """读取参考音频并按 (路径, mtime_ns, 大小) 缓存。
+
+        长回复按段合成时 synthesize 会被调用数十次，若不缓存则每次都重读同一个
+        （可能数 MB 的）参考音频文件。以 mtime_ns + 大小做 key，参考音频被替换后
+        自动失效；缓存条目上限刻意很小（_WAV_CACHE_MAX），避免占住过多内存。
+        """
+        try:
+            st = os.stat(path)
+            key = (path, st.st_mtime_ns, st.st_size)
+        except OSError:
+            # 取不到 stat 信息（极端情况）：直接读，不缓存
+            with open(path, "rb") as f:
+                return f.read()
+        hit = self._wav_cache.get(key)
+        if hit is not None:
+            return hit
+        with open(path, "rb") as f:
+            data = f.read()
+        if len(self._wav_cache) >= _WAV_CACHE_MAX:
+            self._wav_cache.clear()
+        self._wav_cache[key] = data
+        return data
 
     def _backoff(self, attempt: int) -> float:
         """指数退避秒数：base, base*2, base*4 ...（base 由 tts_retry_backoff 配置）。

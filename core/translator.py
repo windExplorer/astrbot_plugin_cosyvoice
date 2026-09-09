@@ -16,6 +16,7 @@
 """
 
 import re
+from collections import OrderedDict
 
 import httpx
 from astrbot.api import logger
@@ -74,6 +75,9 @@ def detect_lang(text: str) -> str:
 class Translator:
     """可配置翻译适配器。配置来自插件自有 data/translate_config.json（热更新）。"""
 
+    # 译文缓存条目上限（LRU）：超过则淘汰最久未用，避免长期运行时内存无界增长
+    CACHE_MAX = 512
+
     def __init__(self, config: dict | None = None):
         self.reload(config or {})
 
@@ -108,7 +112,8 @@ class Translator:
             if str(k).strip() and str(v).strip()
         }
         # 译文缓存：origin -> translated（配置热更新时清空，避免旧译文滞留）
-        self._cache: dict = {}
+        # 有上限的 LRU：超过 CACHE_MAX 淘汰最久未用，避免长期运行内存无界增长
+        self._cache: "OrderedDict[str, str]" = OrderedDict()
 
     # ------------------------------------------------------------------ #
     # 对外入口
@@ -125,8 +130,10 @@ class Translator:
         src = detect_lang(text)
         if not self._should_translate(src, dst):
             return text
-        if text in self._cache:
-            return self._cache[text]
+        cached = self._cache.get(text)
+        if cached is not None:
+            self._cache.move_to_end(text)
+            return cached
         try:
             translated = await self._call_api(text, src, dst)
         except Exception as e:  # noqa: BLE001
@@ -135,6 +142,10 @@ class Translator:
         if not translated or not translated.strip():
             return text
         self._cache[text] = translated
+        self._cache.move_to_end(text)
+        # 超容量则淘汰最久未用，保证缓存不会随运行时长无界增长
+        while len(self._cache) > self.CACHE_MAX:
+            self._cache.popitem(last=False)
         return translated
 
     def _should_translate(self, src: str, dst: str) -> bool:

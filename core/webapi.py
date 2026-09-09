@@ -16,6 +16,7 @@ endpoint 不带前缀）。
 from __future__ import annotations
 
 import json
+import os
 
 from astrbot.api import logger
 from astrbot.api.web import error_response, json_response, request
@@ -510,6 +511,30 @@ def _clear_sessions(plugin):
     return handler
 
 
+# 试听预览保留数量：超出后按修改时间淘汰最旧的，避免 data/previews/ 无限增长
+_PREVIEW_KEEP = 20
+
+
+def _cleanup_previews(dirpath: str, keep: int = _PREVIEW_KEEP) -> None:
+    """按修改时间淘汰多余的试听预览 wav，仅保留最近 keep 个。"""
+    try:
+        files = [
+            os.path.join(dirpath, f)
+            for f in os.listdir(dirpath)
+            if f.lower().endswith(".wav")
+        ]
+        if len(files) <= keep:
+            return
+        files.sort(key=lambda p: os.path.getmtime(p))
+        for p in files[:-keep]:
+            try:
+                os.remove(p)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[cosyvoice] 清理试听预览失败: {e}")
+
+
 # ---------- 合成试听 ----------
 def _synthesize(plugin):
     async def handler():
@@ -550,6 +575,8 @@ def _synthesize(plugin):
         target = _os.path.join(previews_dir, f"{safe_name}.wav")
         try:
             shutil.copyfile(wav_path, target)
+            # 淘汰多余的历史预览，避免 data/previews/ 随试听次数无限增长
+            _cleanup_previews(previews_dir)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[cosyvoice] 试听音频复制到预览目录失败: {e}")
             target = wav_path
