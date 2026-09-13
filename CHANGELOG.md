@@ -2,6 +2,18 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.1.48 (2026-09-13)
+
+- feat: 新增「语音走文件服务 URL 发送」，解决 NapCat 报「文件太大」。
+  - 根因：AstrBot 的 aiocqhttp 适配器对 `Image | Record` 一律 `convert_to_base64()`；而 `Record.convert_to_base64()` 内部是 `MediaResolver(...).to_base64(target_format="wav")`，**会强制转成 wav**。因此传 URL 会被下载后转 wav、传 mp3 会被转回 wav——体积只由时长决定（24k/单声道 wav ≈ 2.88MB/分钟），长语音经 base64 膨胀 33% 后被判为过大。
+  - 方案：把音频注册到 AstrBot 自带的令牌文件服务，得到 `{callback_api_base}/api/file/<token>`。该路由位于 dashboard 鉴权白名单（免登录）、token 保护、带超时，由协议端自行拉取，**全程不经过 base64**，也不再被框架转码。
+  - 实现：新增 `utils/audio_delivery.py`，在适配器入口对 `_from_segment_to_dict` 做**一处 patch**（插件有 20+ 处发送点，逐一改造既易漏又侵入业务逻辑），命中 Record 时产出 URL；**任何异常都回退框架原逻辑**，最差情况与改动前一致。开关关闭时完全不干预框架行为。
+  - 新增配置项（`_conf_schema.json`）：`send_via_file_service`（默认**关**；需 AstrBot 全局配置「对外可达的回调接口地址 callback_api_base」且协议端可访问）、`file_service_transcode_mp3`（默认**关**）、`file_service_mp3_bitrate`（默认 64）、`file_service_token_ttl`（默认 900s）。
+  - 附带：`utils/audio.py` 新增 `has_ffmpeg()` / `wav_to_mp3()`（仅在开启转码时调用，ffmpeg 缺失或转码失败自动回退 wav）。
+  - 为何转 mp3 默认关闭：若原先卡的是 base64 长度，走 URL 后 wav 已足够；只有卡文件体积/时长时才需要转码，故默认保持无损、省 CPU。
+- 验证：`uv run --python 3.12 --no-project python -m compileall` 全量语法编译通过；并用假 AstrBot 模块对 patch 行为做了 7 项验证（开启→产出 URL、开关关闭→回退、缺 `callback_api_base`→回退、已是 URL/文件不存在/非 Record→不接管、`uninstall()` 还原），全部通过。
+- 版本 v2.1.47 -> v2.1.48。
+
 ## v2.1.47 (2026-09-09)
 
 - fix/perf: 代码审查 P0 六项修复（完整审查报告见 `docs/REVIEW_2026-09-09.md`）。

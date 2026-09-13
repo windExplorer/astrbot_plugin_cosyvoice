@@ -57,6 +57,69 @@ def cleanup_file(path: str) -> None:
         logger.debug(f"[cosyvoice] 清理临时文件失败: {path} -> {e}")
 
 
+_FFMPEG_AVAILABLE: bool | None = None
+
+
+def has_ffmpeg() -> bool:
+    """系统是否有可用 ffmpeg（结果缓存，避免每次发送都探测）。"""
+    global _FFMPEG_AVAILABLE
+    if _FFMPEG_AVAILABLE is None:
+        try:
+            import shutil
+
+            _FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
+        except Exception:  # noqa: BLE001
+            _FFMPEG_AVAILABLE = False
+    return _FFMPEG_AVAILABLE
+
+
+async def wav_to_mp3(wav_path: str, bitrate: int = 64, cache_dir: str = "") -> str | None:
+    """把 wav 转成 mp3（体积约为 wav 的 1/8~1/16），失败返回 None 由调用方回退 wav。
+
+    24kHz/16bit/单声道 wav ≈ 2.88MB/分钟，而语音用 32~64kbps mp3 已足够清晰
+    （QQ/OneBot 语音本身支持 mp3），这是减小语音体积最直接的手段。
+    """
+    if not wav_path or not os.path.exists(wav_path) or not has_ffmpeg():
+        return None
+    out = _tmp_path(".mp3", cache_dir)
+    rate = max(16, min(320, int(bitrate or 64)))
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        wav_path,
+        "-codec:a",
+        "libmp3lame",
+        "-b:a",
+        f"{rate}k",
+        "-ar",
+        "24000",
+        "-ac",
+        "1",
+        out,
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        if proc.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) == 0:
+            detail = (err or b"").decode("utf-8", errors="ignore")[:200]
+            logger.debug(f"[cosyvoice] wav→mp3 失败（回退 wav）: {detail}")
+            cleanup_file(out)
+            return None
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[cosyvoice] wav→mp3 异常（回退 wav）: {e}")
+        cleanup_file(out)
+        return None
+
+
 def schedule_cleanup(path: str, delay: float = 60.0) -> None:
     """延迟删除临时文件。
 

@@ -42,7 +42,7 @@ from .core.webapi import register_web_apis
 from .core.translator import Translator
 from .cosyvoice.client import CosyVoiceClient, CosyVoiceServerError, QueueFullError
 from .cosyvoice.router import CosyVoiceRouter
-from .utils import audio
+from .utils import audio, audio_delivery
 
 PLUGIN_ID = "astrbot_plugin_cosyvoice"
 
@@ -253,6 +253,17 @@ class CosyVoicePlugin(Star):
             register_web_apis(self)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[cosyvoice] WebUI API 注册失败（不影响语音功能）: {e}")
+        # 语音发送方式：可选「文件服务 URL」，绕开 OneBot 适配器强制的 base64+转 wav。
+        # 关闭时完全不干预框架行为；开启但缺 callback_api_base 等条件会打印原因并保持原样。
+        try:
+            audio_delivery.sync(
+                bool(cfg.get("send_via_file_service", False)),
+                lambda: self._refresh_cfg(),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[cosyvoice] 「文件服务 URL 发送语音」初始化失败（不影响原有发送）: {e}"
+            )
 
     # ---------- 事件标记辅助 ----------
     def _key(self, event: AstrMessageEvent):

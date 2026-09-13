@@ -1,4 +1,33 @@
 {
+  "send_via_file_service": {
+    "type": "bool",
+    "title": "语音走文件服务 URL 发送（绕开 base64）",
+    "description": "开启后语音先转 mp3，再注册为 AstrBot 文件服务链接，让协议端（NapCat）自行拉取，避免 base64 过大被判「文件太大」。",
+    "hint": "前置条件：AstrBot 全局配置「对外可达的回调接口地址(callback_api_base)」已填写且协议端能访问该地址，否则不生效（会打印原因）。任何环节失败都会自动回退原有发送方式，不会导致语音发不出。",
+    "default": false,
+    "obvious_hint": true
+  },
+  "file_service_transcode_mp3": {
+    "type": "bool",
+    "title": "发送前转 MP3（额外减小体积，默认关闭）",
+    "description": "把 wav 转成 mp3 再投递，文件体积约为原来的 1/8~1/16（wav 24k/单声道 ≈ 2.88MB/分钟 → mp3 64k ≈ 0.48MB/分钟）。",
+    "hint": "默认关闭：走 URL 发送后，若协议端不再报「文件太大」，说明原先卡的是 base64 长度，则无需转码（省 CPU 且音质无损）。仅当仍报文件过大（说明卡的是文件体积/时长）时才建议开启。开启需 PATH 中有 ffmpeg，转码失败会自动回退 wav。",
+    "default": false
+  },
+  "file_service_mp3_bitrate": {
+    "type": "int",
+    "title": "MP3 码率(kbps)",
+    "description": "语音用 32~64 已足够清晰；码率越低体积越小。",
+    "hint": "建议 32（最小）~64（更清晰）。仅在开启「发送前转 MP3」时生效。",
+    "default": 64
+  },
+  "file_service_token_ttl": {
+    "type": "int",
+    "title": "文件链接有效期(秒)",
+    "description": "文件服务令牌的有效期，协议端需在此期间把文件拉走。",
+    "hint": "默认 900 秒（15 分钟）。过短可能导致网络慢时协议端拉取失败（会表现为发送失败）。",
+    "default": 900
+  },
   "base_url": {
     "type": "string",
     "title": "单机服务地址",
