@@ -188,6 +188,7 @@ def _get_config(plugin):
                 "分段符号 (segment_punct)": cfg.get("segment_punct", ""),
                 "单段硬上限 (max_text_len)": cfg.get("max_text_len", 200),
                 "按换行分段 (split_by_newline)": bool(cfg.get("split_by_newline", True)),
+                "换行最小字数 (newline_min_len)": cfg.get("newline_min_len", 10),
                 "合并单条发送 (segment_merge)": bool(cfg.get("segment_merge", False)),
                 "失败重试 (tts_max_retry)": cfg.get("tts_max_retry", 0),
                 "重试退避 (tts_retry_backoff)": cfg.get("tts_retry_backoff", 0.5),

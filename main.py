@@ -1551,33 +1551,34 @@ class CosyVoicePlugin(Star):
             logger.warning(f"[cosyvoice] 失败兜底补发文字也失败: {e}")
 
     # ---------- 用户指令：/tts、/tts0、/tts1（均只发语音，不随 send_mode 发文字） ----------
-    async def _iter_cmd_audio(self, text: str, voice, mode: str = "default"):
+    def _cmd_blocks(self, text: str, mode: str) -> list:
+        """把指令文本按模式切成「待合成块」（块内不含副语言标记）。
+
+        - ``whole``：整段作为一块（内部仍按标点切分合成后拼接成一条音频，防超长）；
+        - ``newline``：按换行符切块，过短的块与相邻块合并（阈值 newline_min_len），
+          避免「嗯」「好的」这类极短行单独占一条语音。
+        """
+        if mode == "newline":
+            return self.engine.split_newline_blocks(text)
+        return [text] if (text or "").strip() else []
+
+    async def _iter_cmd_audio(self, text: str, voice, mode: str = "whole"):
         """按指令模式逐条产出 wav 路径（异常向上抛，由指令层统一提示）：
 
-        - ``whole``：整段一次合成、发一条语音（内部仍会切段拼接防超长）；
-        - ``newline``：按换行符分块，每块一条语音；
-        - ``default``：按配置 segment_merge（合并成一条 / 分段逐条）。
+        - ``whole``：整段一次合成、只发一条语音（内部仍会切分拼接防超长）；
+        - ``newline``：按换行符分块，每块一条语音（过短的块并入相邻块）。
+
+        副语言标记在【分块之后逐块注入】：[breath] 这类标记本身占字数，若先注入再判断
+        「块是否过短」，1 字的「嗯」会因带上标记被算成长块，失去短块合并效果。
         """
-        if mode == "whole":
-            path = await self.engine.synthesize(text, voice)
+        for block in self._cmd_blocks(text, mode):
+            voiced = inject_markup(
+                block, self.engine.voice_language(voice), self.config,
+                voice=self.engine.voices.get(voice),
+            )
+            path = await self.engine.synthesize(voiced, voice)
             if path:
                 yield path
-            return
-        if mode == "newline":
-            blocks = [b.strip() for b in re.split(r"\n+", text) if b.strip()]
-            for block in blocks:
-                path = await self.engine.synthesize(block, voice)
-                if path:
-                    yield path
-            return
-        # default：按配置
-        if self.config.get("segment_merge", False):
-            path = await self.engine.synthesize(text, voice)
-            if path:
-                yield path
-        else:
-            async for wav in self.engine.iter_segment_wavs(text, voice):
-                yield wav
 
     async def _tts_cmd_impl(self, event: AstrMessageEvent, text: str, mode: str, empty_hint: str):
         """指令类合成公共逻辑：发送方式遵循 tts_type/send_mode——both 时语音之外补发文字，voice_only 时只发语音。"""
@@ -1585,11 +1586,6 @@ class CosyVoicePlugin(Star):
         orig_text = text
         if self.config.get("skip_bracket_tts", True):
             text = self._strip_brackets(text)
-            _sv = self._session_voice(event)
-            text = inject_markup(
-                text, self.engine.voice_language(_sv), self.config,
-                voice=self.engine.voices.get(_sv),
-            )
             if not text.strip():
                 yield event.plain_result("括号里的内容我就不念啦～")
                 return
@@ -1628,6 +1624,11 @@ class CosyVoicePlugin(Star):
 
     @filter.command("tts")
     async def tts_cmd(self, event: AstrMessageEvent):
+        """/tts 文本：整段一次合成、只发一条语音念完（不分段、不逐条发）。
+
+        历史行为是按 segment_merge 配置决定「合并成一条 / 分段逐条发」，分段逐条发送
+        会出现「同一段话被拆成多条语音、每条只有半句话」的观感，故改为始终整段合成。
+        """
         self._refresh_cfg()
         raw = (event.message_str or "").strip()
         # 去掉 /tts 命令前缀：兼容 AstrBot 是否已自动剥离命令词，以及带空格/@提及等情况
@@ -1636,13 +1637,16 @@ class CosyVoicePlugin(Star):
             yield event.plain_result("试试这样：/tts 后面跟上你想让我念的话～")
             return
         async for res in self._tts_cmd_impl(
-            event, text, "default", "哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？"
+            event, text, "whole", "哎呀，话到嘴边卡壳了，这次没念出来，稍后再试试？"
         ):
             yield res
 
     @filter.command("tts0")
     async def tts0_cmd(self, event: AstrMessageEvent):
-        """/tts0 文本：整段一次合成、一口气念完（发一条语音，不分段发多条）。"""
+        """/tts0 文本：整段一次合成、一口气念完（发一条语音，不分段发多条）。
+
+        v2.1.49 起 /tts 已改为同样的行为，本指令保留仅为兼容旧用法（两者等价）。
+        """
         self._refresh_cfg()
         raw = (event.message_str or "").strip()
         text = re.sub(r"^[/\s@]*tts0\b\s*", "", raw, flags=re.IGNORECASE).strip()
@@ -1656,7 +1660,11 @@ class CosyVoicePlugin(Star):
 
     @filter.command("tts1")
     async def tts1_cmd(self, event: AstrMessageEvent):
-        """/tts1 文本：按换行符分段，每段一条语音逐条念（both 时同时发文字）。"""
+        """/tts1 文本：按换行符分块，每块一条语音逐条念（both 时同时发文字）。
+
+        过短的块（< newline_min_len 字，默认 10）会与相邻块合并，
+        避免「嗯」「好的」这类极短行单独占一条语音。
+        """
         self._refresh_cfg()
         raw = (event.message_str or "").strip()
         text = re.sub(r"^[/\s@]*tts1\b\s*", "", raw, flags=re.IGNORECASE).strip()
@@ -1829,9 +1837,9 @@ class CosyVoicePlugin(Star):
         self._refresh_cfg()
         lines = [
             "CosyVoice 语音 · 常用指令",
-            "/tts 文本 —— 让我把这句话念出来（按配置分段）",
-            "/tts0 文本 —— 一口气念完，只发一条语音（不分段）",
-            "/tts1 文本 —— 按换行符分段逐条念（每条语音对应一行）",
+            "/tts 文本 —— 整段念完，只发一条语音（不分段）",
+            "/tts0 文本 —— 同 /tts（整段一条语音，保留旧用法）",
+            "/tts1 文本 —— 按换行分块逐条念（过短的行会与相邻行合并）",
             "/tts_on [/tts_off] —— 开启/关闭本聊天自动语音（可加概率，如 /tts_on 0.8）",
             "/tts_type -1|0|1 —— 本聊天发送方式：-1 跟随全局 / 0 仅语音 / 1 语音+文字",
             "/tts_voice 名字 —— 切换本聊天音色（不带参数可查看可选音色）",

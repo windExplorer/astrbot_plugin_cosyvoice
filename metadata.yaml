@@ -1,7 +1,7 @@
 name: astrbot_plugin_cosyvoice # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
 display_name: CosyVoice3 语音合成 # 用于展示的名字
 desc: 接入本地 CosyVoice3 推理服务，让机器人以可配置音色朗读回复（支持 LLM 工具、/tts 指令与关键词触发）。 # 插件简短描述
-version: v2.1.48 # 插件版本号
+version: v2.1.49 # 插件版本号
 author: Yours # 作者
 repo: https://github.com/AstrBotDevs/AstrBot # 插件的仓库地址（请替换为你的仓库）
 
@@ -284,8 +284,14 @@ config:
     type: bool
     title: 优先按换行分段
     description: QQ 等多行消息：遇到换行先按行切分，再各自合成
-    hint: 默认 true。开启后：一个或连续多个换行 \n 都视为硬分段边界，逐行 strip 去空，每行独立分段/合成，不跨行合并（多行语义通常独立）。避免把换行符念成噪音/静音，也避免超长行一次合成。关闭则整段按标点窗口分段（旧行为）。
+    hint: 默认 true。开启后：一个或连续多个换行 \n 都视为分段边界，逐行 strip 去空，每行独立分段/合成。避免把换行符念成噪音/静音，也避免超长行一次合成。过短的行（< 换行分段最小字数）会先与相邻行合并，不会单独成段。关闭则整段按标点窗口分段（旧行为）。
     default: true
+  - key: newline_min_len
+    type: int
+    title: 换行分段最小字数
+    description: 按换行切出的块短于此字数时，与相邻块合并（0=不合并）
+    hint: 默认 10。多行消息里「嗯」「好的」这类极短行原本会各自占一条语音（听着像被拆得七零八落），设为此值后这类短行会并入相邻行一起念。合并结果仍受「单段硬上限 max_text_len」约束，不会滚成超长段。指令 /tts1 同样受此值控制。
+    default: 10
   - key: auto_breath
     type: bool
     title: 自动标点换气

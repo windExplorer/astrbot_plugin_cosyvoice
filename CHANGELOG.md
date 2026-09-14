@@ -2,6 +2,25 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.1.49 (2026-09-15)
+
+- feat: `/tts` 指令改为「整段一次合成、只发一条语音」，不再分段逐条发。
+  - 现象：用户反馈「分段不靠谱」——`/tts 一句话` 会被拆成好几条语音消息，每条只有半句。
+  - 根因：`/tts` 走 `_iter_cmd_audio(mode="default")`，按 `segment_merge` 配置分叉；而该配置**默认 false**，于是走 `iter_segment_wavs` 逐段 yield，每段被 `chain_result` 单独发成一条语音。
+  - 修复：`/tts` 改用 `whole` 模式——`engine.synthesize()` 内部仍按标点切分（防止无标点长文一次甩给服务端），但把各段 PCM 拼接成**一个 wav** 后只发一条语音。`/tts0` 保留且与 `/tts` 等价（旧用法兼容）。
+  - 影响面：`/tts` 不再受 `segment_merge` 影响；自动语音（`on_decorating_result`）链路不变，仍按该配置走合并/逐段。
+- feat: 换行分块新增「短块合并」，避免「嗯」「好的」这类极短行各占一条语音。
+  - 现象：多行文本里字数很少的行会被单独切成一条语音，听着像被拆得七零八落。
+  - 修复：新增配置 `newline_min_len`（默认 **10** 字，`0`=不合并）；`TtsEngine.split_newline_blocks()` 按换行切块后复用既有的 `_merge_short()` 做合并——块字数 < 该值时并入相邻块（首块并入后一块、末块并入前一块），合并结果仍受「单段硬上限 `max_text_len`」约束，不会像 v2.1.46 之前那样吸附滚成超长段。
+  - 生效范围：① 自动语音/模型回复的换行预分段（`split_text`，`split_by_newline=true` 时）；② 指令 `/tts1`。两处共用同一套逻辑。
+  - 实现细节：`split_by_newline` 的「不跨行合并」旧行为被放开，但 `_split_window` 对合并后的块仍按标点/硬上限二次切分；合并后的块不含换行，故不会在 `_legacy_split` 里被换行再次切开（否则合并等于白做）。
+- fix: 指令链路的副语言标记改为「分块之后逐块注入」。
+  - 原因：`[breath]` 这类标记本身占字数（1 字的「嗯」注入后变成 9 字），若像原来那样先对全文注入标记、再判断「块是否过短」，短块判定必然失效。改为 `_cmd_blocks()` 先切块（纯文本）、`_iter_cmd_audio()` 再逐块 `inject_markup` 后送合成。
+- refactor: 移除 `_iter_cmd_audio` 中已无人调用的 `default` 分支（`/tts` 改走 `whole` 后不再需要），`/tts_help` 文案同步改写。
+- 配置新增 `newline_min_len`：已同步 `_conf_schema.json`、`metadata.yaml`（插件的 `config` 列表）与 WebUI 配置页「分段与重试」分组；`split_by_newline` 的 hint 文案同步说明短块合并行为。
+- 验证：本机无可用 python（`python` 报 9009），未跑 `compileall`；改动为纯逻辑替换，已人工通读改动区域并核对合并边界（示例：`["嗯","好的","我这就去看看风景吧"]` → 合并为 1 块；每行均 ≥10 字时保持逐行独立）。
+- 版本 v2.1.48 -> v2.1.49。
+
 ## v2.1.48 (2026-09-13)
 
 - feat: 新增「语音走文件服务 URL 发送」，解决 NapCat 报「文件太大」。

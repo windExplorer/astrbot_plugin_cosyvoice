@@ -408,21 +408,42 @@ class TtsEngine:
         if not text:
             return []
 
-        # 优先按换行预分段（QQ 等多行消息）：一个/连续多个换行都视为硬边界，
+        # 优先按换行预分段（QQ 等多行消息）：一个/连续多个换行都视为边界，
         # 归一化、逐行 strip、去空，避免把换行符念成噪音/静音块，也避免超长行一次合成。
-        # 每行独立走窗口分段 + 行内短段合并；不跨行合并（多行通常语义独立）。
+        # 每行独立走窗口分段 + 行内短段合并；过短的行（< newline_min_len 字）先与相邻行合并，
+        # 避免「嗯」「好的」这类极短行单独成段、单独占一条语音。
         if self._split_by_newline():
-            blocks = [ln.strip() for ln in re.split(r"\n+", text)]
-            blocks = [b for b in blocks if b]
+            blocks = self.split_newline_blocks(text)
             if len(blocks) <= 1:
-                # 实际没有换行：退化为整段处理（与原行为一致）
-                return self._split_window(text)
+                # 实际没有换行（或短行已全部并入同一块）：退化为整段处理（与原行为一致）
+                return self._split_window(blocks[0] if blocks else text)
             chunks: list = []
             for b in blocks:
                 chunks.extend(self._split_window(b))
             return chunks
 
         return self._split_window(text)
+
+    def split_newline_blocks(self, text: str) -> list:
+        """按换行切块，并把过短的块并入相邻块（供 split_text 预分段与 /tts1 指令共用）。
+
+        - 一个/连续多个换行都视为块边界（``\\n+``），逐块 strip、去空；
+        - 块字数 < ``newline_min_len`` 时与相邻块合并（首块并入后一块、末块并入前一块），
+          避免「嗯」「好的」这类极短行单独成段、单独发一条语音；
+        - 合并结果受单段硬上限 max_text_len 约束（0=不限制）：否则长块会不断吸附短块
+          滚成远超配置的超长段（与 _merge_short 的既有约束一致）。
+        """
+        blocks = [b.strip() for b in re.split(r"\n+", text or "") if b.strip()]
+        if not blocks:
+            return []
+        return self._merge_short(blocks, self._newline_min_len(), self._seg_hard_cap())
+
+    def _newline_min_len(self) -> int:
+        """换行分块的短块合并下限（配置 newline_min_len，默认 10 字；0/非法 = 不合并）。"""
+        try:
+            return max(0, int(float(self.config.get("newline_min_len", 10) or 0)))
+        except (TypeError, ValueError):
+            return 10
 
     def _split_window(self, text: str) -> list:
         """按标点窗口对单段文本分段（被 split_text 调用，可能按行多次调用）。"""
