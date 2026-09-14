@@ -9,6 +9,7 @@ import asyncio
 from astrbot.api import logger
 
 from ..cosyvoice.client import CosyVoiceClient, CosyVoiceServerError, QueueFullError
+from .markup import SPECIAL_TOKENS
 from ..utils import audio
 
 # 插件根目录（core/ 的上一级），用于解析相对参考音频路径
@@ -51,6 +52,23 @@ _GENERIC_TAG_RE = re.compile(r"</?[A-Za-z][^>\n]*>")
 # Markdown 强调符号（**加粗**、__下划线加粗__）：星号/下划线会被 TTS 念出来或造成怪顿，
 # 剔除符号本身、保留文字。单星号/单下划线不动（避免误伤乘号等正常用法）。
 _MD_EMPH_RE = re.compile(r"\*\*|__")
+
+# 段尾「未闭合的副语言标记」形态：以 `[` 开头、后面只有标记名字符、到段尾都没等到 `]`。
+# 例：`...好呀。[quick_` ——分段硬切正好落在 [quick_breath] 中间就是这个样子。
+_TAG_TAIL_RE = re.compile(r"\[([A-Za-z_]*)$")
+
+
+def _has_open_markup_tail(s: str) -> bool:
+    """段尾是否为「某个白名单副语言标记被截断的前缀」。
+
+    只认前缀匹配（`[quick_` 是 `quick_breath` 的前缀才算），避免误伤普通文本里
+    未配对的 `[`（如模型写的「温度[摄氏」这类内容被错误拼接）。
+    """
+    m = _TAG_TAIL_RE.search(s or "")
+    if not m:
+        return False
+    head = m.group(1).lower()
+    return any(tok.startswith(head) for tok in SPECIAL_TOKENS)
 
 
 def _looks_like_tool_call(text: str, start: int) -> int:
@@ -404,6 +422,13 @@ class TtsEngine:
         return f"[{esc}]"
 
     def split_text(self, text: str) -> list:
+        """分段统一入口：切分后再把被切开的副语言标记接回完整（见 _merge_broken_markup）。
+
+        所有合成路径（合并/逐段/指令/工具）都经由本方法取分段，故标记保护收口在这里。
+        """
+        return self._merge_broken_markup(self._split_text_raw(text))
+
+    def _split_text_raw(self, text: str) -> list:
         text = (text or "").strip()
         if not text:
             return []
@@ -519,6 +544,27 @@ class TtsEngine:
         return bool(self.config.get("split_by_newline", True))
 
     @staticmethod
+    def _merge_broken_markup(chunks: list) -> list:
+        """把被段边界切开的副语言标记接回完整（段尾未闭合的标记并入下一段）。
+
+        分段是纯字符/标点驱动的，不感知标记边界：长句硬切（max_text_len）与分段窗口
+        （segment_len / segment_first_len 的 truncate 硬切）都可能正好落在
+        `[quick_breath]` 中间，得到 `...好呀。[quick_` + `breath]然后...` 两段。
+        服务端只认**完整**的 special token，残片会被当普通文本念出来（用户听到的就是
+        「breath」这类英文单词），所以这里必须把残片与下一段拼回去。
+
+        判定用「白名单标记前缀」而非「有 `[` 就拼」：模型正文里未配对的 `[`（如
+        「温度[摄氏」）不该被误改，只有 `[quick_`（`quick_breath` 的前缀）这类才处理。
+        """
+        out: list = []
+        for c in chunks:
+            if out and _has_open_markup_tail(out[-1]):
+                out[-1] = out[-1] + c
+            else:
+                out.append(c)
+        return out
+
+    @staticmethod
     def _merge_short(chunks: list, min_len: int, max_len: int = 0) -> list:
         """把 < min_len 字的短段并入相邻段，避免「哈哈。」这类超短句单独成段。
 
@@ -593,6 +639,16 @@ class TtsEngine:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[cosyvoice] 翻译接入异常，回退原文: {e}")
             return text
+
+    async def translate_for_voice(self, text: str, voice_name: str | None = None) -> str:
+        """按音色语种翻译【纯文本】（供指令/工具路径在注入副语言标记之前调用）。
+
+        顺序很关键：标记必须在翻译**之后**注入。若先注入再翻译（早期指令/工具路径
+        就是这样：注入标记后调用未带 pre_translated 的 synthesize），整段（含
+        `[breath]` 这类标记）会被送进翻译接口——标记可能被改写/翻译/删除，服务端
+        认不出就成了普通文本被念出来。自动语音链路本就「先翻译后注入」，此处对齐。
+        """
+        return await self._maybe_translate(text, voice_lang=self.voice_language(voice_name))
 
     def voice_language(self, voice_name: str | None = None) -> str | None:
         """返回所选音色的语种（用于翻译目标语种判定），无可用音色返回 None。"""

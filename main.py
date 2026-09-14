@@ -1568,22 +1568,32 @@ class CosyVoicePlugin(Star):
         - ``whole``：整段一次合成、只发一条语音（内部仍会切分拼接防超长）；
         - ``newline``：按换行符分块，每块一条语音（过短的块并入相邻块）。
 
-        副语言标记在【分块之后逐块注入】：[breath] 这类标记本身占字数，若先注入再判断
-        「块是否过短」，1 字的「嗯」会因带上标记被算成长块，失去短块合并效果。
+        处理顺序（每一步都不能换位）：
+        1) 分块——副语言标记在分块【之后】才注入：[breath] 这类标记本身占字数，若先注入
+           再判断「块是否过短」，1 字的「嗯」会因带上标记被算成长块，失去短块合并效果；
+        2) 翻译——只翻【纯文本】。若先注入标记再翻译，`[breath]` 会被整段送进翻译接口，
+           译文中的标记可能被改写/翻译/删除，服务端认不出就当普通文本念出来；
+        3) 注入标记，合成时 pre_translated=True（避免二次翻译）。
         """
+        vlang = self.engine.voice_language(voice)
         for block in self._cmd_blocks(text, mode):
+            block_text = await self.engine.translate_for_voice(block, voice)
             voiced = inject_markup(
-                block, self.engine.voice_language(voice), self.config,
-                voice=self.engine.voices.get(voice),
+                block_text, vlang, self.config, voice=self.engine.voices.get(voice)
             )
-            path = await self.engine.synthesize(voiced, voice)
+            # 排查日志：完整打印送入服务端的合成文本（标记是否完整、是否被改写一眼可查）
+            logger.info(f"[cosyvoice] 指令合成文本={voiced!r}")
+            path = await self.engine.synthesize(voiced, voice, pre_translated=True)
             if path:
                 yield path
 
     async def _tts_cmd_impl(self, event: AstrMessageEvent, text: str, mode: str, empty_hint: str):
-        """指令类合成公共逻辑：发送方式遵循 tts_type/send_mode——both 时语音之外补发文字，voice_only 时只发语音。"""
-        # 保留原始文本（含括号），用于 both 模式下补发文字；括号内容不进入语音合成
-        orig_text = text
+        """指令类合成公共逻辑：**只发语音，不补发文字**（/tts、/tts0、/tts1 共用）。
+
+        历史行为是 both 模式下语音之外再补发一遍原文文字；但指令本身就是「念给我听」的
+        一次性动作，文字由调用方自己掌握，补发反而让同一条内容出现两遍（用户明确要求去掉）。
+        发送方式（/tts_type、send_mode）只作用于自动语音链路，不再影响指令。
+        """
         if self.config.get("skip_bracket_tts", True):
             text = self._strip_brackets(text)
             if not text.strip():
@@ -1603,8 +1613,7 @@ class CosyVoicePlugin(Star):
             if not sent:
                 yield event.plain_result(empty_hint)
             else:
-                if self._effective_send_mode(event, self._refresh_cfg()) == "both":
-                    yield event.plain_result(self._clean_display(orig_text))
+                # 指令只发语音：不再按 send_mode 补发原文文字（用户明确要求去掉）
                 self._push_event(True, "指令语音已发送")
         except QueueFullError:
             # 排队过长：服务端在线但繁忙，进冷却避免反复打繁忙服务器，提示稍后再试
@@ -1837,8 +1846,8 @@ class CosyVoicePlugin(Star):
         self._refresh_cfg()
         lines = [
             "CosyVoice 语音 · 常用指令",
-            "/tts 文本 —— 整段念完，只发一条语音（不分段）",
-            "/tts0 文本 —— 同 /tts（整段一条语音，保留旧用法）",
+            "/tts 文本 —— 整段念完，只发一条语音（不分段、不发文字）",
+            "/tts0 文本 —— 同 /tts（保留旧用法）",
             "/tts1 文本 —— 按换行分块逐条念（过短的行会与相邻行合并）",
             "/tts_on [/tts_off] —— 开启/关闭本聊天自动语音（可加概率，如 /tts_on 0.8）",
             "/tts_type -1|0|1 —— 本聊天发送方式：-1 跟随全局 / 0 仅语音 / 1 语音+文字",
@@ -1933,14 +1942,18 @@ class CosyVoicePlugin(Star):
         text = clean_tts_text(text)
 
         target_voice = voice or self._session_voice(event)
+        # 先翻译（纯文本）再注入副语言标记，合成时 pre_translated=True：与自动语音链路一致，
+        # 避免 `[breath]` 这类标记被整段送进翻译接口改写/翻译后，服务端认不出而当文本念出来。
+        plain_text = await self.engine.translate_for_voice(text.strip(), target_voice)
         tts_text = inject_markup(
-            text.strip(), self.engine.voice_language(target_voice), self.config,
+            plain_text, self.engine.voice_language(target_voice), self.config,
             voice=self.engine.voices.get(target_voice),
         )
+        logger.info(f"[cosyvoice] text_to_speech 合成文本={tts_text!r}")
         merge = bool(self.config.get("segment_merge", False))
         try:
             if merge:
-                path = await self.engine.synthesize(tts_text, target_voice)
+                path = await self.engine.synthesize(tts_text, target_voice, pre_translated=True)
                 if not path:
                     await self._realtime_send(event, [Comp.Plain("话到嘴边卡壳了，这次没念出来，待会儿再试试？")])
                     return "语音合成失败，已告知用户。"
@@ -1956,7 +1969,7 @@ class CosyVoicePlugin(Star):
                 # 不合并：边合成边逐段主动发送（每段独立一条消息，服务端返回一段即发一段）
                 sent = False
                 sent_ok = False
-                async for wav in self.engine.iter_segment_wavs(tts_text, target_voice):
+                async for wav in self.engine.iter_segment_wavs(tts_text, target_voice, pre_translated=True):
                     sent = True
                     if await self._realtime_send(event, [Comp.Record(file=wav, url=wav)]):
                         sent_ok = True
