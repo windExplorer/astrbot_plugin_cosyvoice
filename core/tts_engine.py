@@ -57,6 +57,9 @@ _MD_EMPH_RE = re.compile(r"\*\*|__")
 # 例：`...好呀。[quick_` ——分段硬切正好落在 [quick_breath] 中间就是这个样子。
 _TAG_TAIL_RE = re.compile(r"\[([A-Za-z_]*)$")
 
+# 「整段只有副语言标记」形态（允许前后空白）：如 `[breath]`、`[quick_breath][breath]`。
+_MARKUP_ONLY_RE = re.compile(r"^(?:\s*\[[A-Za-z_]+\])+\s*$")
+
 
 def _has_open_markup_tail(s: str) -> bool:
     """段尾是否为「某个白名单副语言标记被截断的前缀」。
@@ -422,11 +425,11 @@ class TtsEngine:
         return f"[{esc}]"
 
     def split_text(self, text: str) -> list:
-        """分段统一入口：切分后再把被切开的副语言标记接回完整（见 _merge_broken_markup）。
+        """分段统一入口：切分 → 接回被切开的标记 → 吸收纯标记段（见各 helper）。
 
         所有合成路径（合并/逐段/指令/工具）都经由本方法取分段，故标记保护收口在这里。
         """
-        return self._merge_broken_markup(self._split_text_raw(text))
+        return self._absorb_lone_markup(self._merge_broken_markup(self._split_text_raw(text)))
 
     def _split_text_raw(self, text: str) -> list:
         text = (text or "").strip()
@@ -562,6 +565,27 @@ class TtsEngine:
                 out[-1] = out[-1] + c
             else:
                 out.append(c)
+        return out
+
+    @staticmethod
+    def _absorb_lone_markup(chunks: list) -> list:
+        """把「整段只有副语言标记」的段并入前一段（首段则丢弃）。
+
+        根因（用户看到的「多余的 1 秒空白语音」）：自动换气标记插在句末标点**之后**
+        （`A。` → `A。[breath]`），而分段总是在「窗口内最后一个分段符号」处切——
+        最后一句被上一段收走后，剩余的就只有尾随标记，被切成一个只有 `[breath]` 的段。
+        它含字母、能通过 is_speakable，被送去合成后服务端产出约 1 秒换气声；
+        逐段发送（segment_merge=false）模式下就是一条独立的空白语音。
+        处理：并入前一段（换气声跟随前一句音频结尾，听感自然）；首段就是纯标记时
+        没有可并的对象，直接丢弃（开头的换气没有意义）。
+        """
+        out: list = []
+        for c in chunks:
+            if _MARKUP_ONLY_RE.match(c or ""):
+                if out:
+                    out[-1] = out[-1] + c
+                continue
+            out.append(c)
         return out
 
     @staticmethod
