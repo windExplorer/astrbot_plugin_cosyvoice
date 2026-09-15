@@ -1,7 +1,7 @@
 name: astrbot_plugin_cosyvoice # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
 display_name: CosyVoice3 语音合成 # 用于展示的名字
 desc: 接入本地 CosyVoice3 推理服务，让机器人以可配置音色朗读回复（支持 LLM 工具、/tts 指令与关键词触发）。 # 插件简短描述
-version: v2.1.51 # 插件版本号
+version: v2.1.52 # 插件版本号
 author: Yours # 作者
 repo: https://github.com/AstrBotDevs/AstrBot # 插件的仓库地址（请替换为你的仓库）
 
@@ -224,7 +224,7 @@ config:
     type: string
     title: 分段回复字数（最小,最大）
     description: 每段（首段除外）的字数区间，配合分段符号切分，用于长文逐段快速合成
-    hint: 格式「最小,最大」(如 30,50)：在 最大 字范围内取最后一个命中的分段符号切分；无标点时按 segment_nopunct 处理(硬切到最大 或 往后找)。最小 同时是短段合并下限——切出的段若短于它(如「哈哈。」)会自动并入相邻段，避免超短句单独成段。只填一个数字(如 50)表示只设最大、不强制合并。0/留空=关闭分段(回退旧逻辑)。与 max_text_len 互相独立。
+    hint: 格式「最小,最大」(如 30,50)：在 最大 字范围内取最后一个命中的分段符号切分；无标点时按 segment_nopunct 处理(硬切到最大 或 往后找)。最小 同时是短段合并下限——切出的段若短于它(如「哈哈。」)会自动并入相邻段，避免超短句单独成段。只填一个数字(如 50)表示只设最大、不强制合并。0/留空=关闭分段(回退旧逻辑)。字数按剔除语音标记（[breath] 等）后的正文计算，标记不占额度。与 max_text_len 互相独立。
     default: "0"
   - key: segment_first_len
     type: string

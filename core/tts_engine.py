@@ -9,7 +9,7 @@ import asyncio
 from astrbot.api import logger
 
 from ..cosyvoice.client import CosyVoiceClient, CosyVoiceServerError, QueueFullError
-from .markup import SPECIAL_TOKENS
+from .markup import MARKUP_WHITELIST_RE, SPECIAL_TOKENS
 from ..utils import audio
 
 # 插件根目录（core/ 的上一级），用于解析相对参考音频路径
@@ -59,6 +59,49 @@ _TAG_TAIL_RE = re.compile(r"\[([A-Za-z_]*)$")
 
 # 「整段只有副语言标记」形态（允许前后空白）：如 `[breath]`、`[quick_breath][breath]`。
 _MARKUP_ONLY_RE = re.compile(r"^(?:\s*\[[A-Za-z_]+\])+\s*$")
+
+
+def _effective_len(s: str) -> int:
+    """有效字数：剔除副语言标记后的长度。
+
+    标记（[breath]/[quick_breath]/[sigh] 等）只给模型看，**不该计入「每段 N 字」的
+    额度**：48 字的正文注入标记后会膨胀到近百字，若按原始字符数分段，用户配置的
+    窗口会被标记挤爆（48 字被当成 98 字、明明不超限却被切开）。
+    """
+    return len(MARKUP_WHITELIST_RE.sub("", s or ""))
+
+
+def _eff_prefix(text: str) -> list:
+    """有效字数前缀和：pre[i] = text[:i] 中非标记字符的个数（标记字符权重 0）。"""
+    n = len(text)
+    w = [1] * n
+    for m in MARKUP_WHITELIST_RE.finditer(text):
+        for i in range(m.start(), m.end()):
+            w[i] = 0
+    pre = [0] * (n + 1)
+    acc = 0
+    for i in range(n):
+        acc += w[i]
+        pre[i + 1] = acc
+    return pre
+
+
+def _eff_seek(pre: list, start: int, budget: int) -> int:
+    """从 start 起推进到「有效字数恰好用完 budget」的原文位置。
+
+    返回满足 ``pre[pos] - pre[start] <= budget`` 的最大 pos：标记字符权重为 0，
+    二分会停在标记末尾——窗口/硬切边界不会落在标记中间，整个标记归入本段。
+    """
+    n = len(pre) - 1
+    target = pre[start] + max(0, budget)
+    lo, hi = start, n
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if pre[mid] <= target:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
 
 
 def _has_open_markup_tail(s: str) -> bool:
@@ -485,18 +528,21 @@ class TtsEngine:
             chunks = self._legacy_split(text)
         else:
             # 新分段逻辑：窗口上界 = hi，首段可用独立的 segment_first_len 区间。
-            # 在 [start, start+hi) 内命中的最后一个分段符号处切；min(lo) 作为短段合并下限。
+            # 在窗口内命中的最后一个分段符号处切；min(lo) 作为短段合并下限。
             # max_text_len 不参与窗口，仅作 truncate 模式下「无标点硬切」的兜底上限。
+            # 窗口推进按「有效字数」（剔除副语言标记后）计算：标记只服务合成、不占
+            # 每段字数额度，否则 48 字正文注入标记后变成 98 字，会被窗口误切成多段。
             hard_cap = self._seg_hard_cap()
             punct = self._seg_punct_class()
             punct_re = re.compile(punct)
             n = len(text)
+            pre = _eff_prefix(text)
             chunks: list = []
             start = 0
             is_first = True
             while start < n:
                 fw_lo, fw_hi = (self._seg_first_window() if is_first else (lo, hi))
-                end = min(start + fw_hi, n)
+                end = _eff_seek(pre, start, fw_hi)
                 # 在 [start, end) 窗口内找【最后一个】命中的分段符号：
                 # 取窗口内字数范围内最后一个标点，以它前面（含符号）为一段。
                 last = None
@@ -510,13 +556,15 @@ class TtsEngine:
                     start = cut
                 else:
                     mode = self._seg_nopunct_mode("first" if is_first else "body")
-                    # seek 模式受 hard_cap 约束：剩余长度或 seek 目标超出硬上限时放弃 seek，
-                    # 退回 truncate 硬切——否则无标点长文（错误信息/英文等）会 seek 出
+                    # seek 模式受 hard_cap 约束：剩余有效长度或 seek 目标超出硬上限时放弃
+                    # seek，退回 truncate 硬切——否则无标点长文（错误信息/英文等）会 seek 出
                     # 远超配置窗口的超长段
-                    if mode == "seek" and not (hard_cap > 0 and n - start > hard_cap):
+                    if mode == "seek" and not (hard_cap > 0 and pre[n] - pre[start] > hard_cap):
                         # 窗口内无标点：往后（超出窗口）找第一个命中的分段符号
                         nxt = punct_re.search(text, end)
-                        if nxt is not None and not (hard_cap > 0 and nxt.end() - start > hard_cap):
+                        if nxt is not None and not (
+                            hard_cap > 0 and pre[nxt.end()] - pre[start] > hard_cap
+                        ):
                             cut = nxt.end()
                             seg = text[start:cut].strip()
                             if seg:
@@ -530,7 +578,7 @@ class TtsEngine:
                             start = n
                     else:
                         # truncate：窗口内无标点，直接在窗口末（受 hard_cap 兜底）硬切
-                        cut = min(end, start + hard_cap) if hard_cap > 0 else end
+                        cut = min(end, _eff_seek(pre, start, hard_cap)) if hard_cap > 0 else end
                         seg = text[start:cut].strip()
                         if seg:
                             chunks.append(seg)
@@ -592,6 +640,8 @@ class TtsEngine:
     def _merge_short(chunks: list, min_len: int, max_len: int = 0) -> list:
         """把 < min_len 字的短段并入相邻段，避免「哈哈。」这类超短句单独成段。
 
+        长度一律按「有效字数」（剔除副语言标记后，_effective_len）计算：标记不计入
+        每段字数额度，否则带标记的段会被高估、该合并的不合并。
         max_len > 0 时为合并结果设上限：并入会使结果超过 max_len 则放弃合并、保持独立段。
         否则长段会不断吸附 <min_len 的短段越滚越大，滚出远超配置窗口的 100+ 字超长段
         （用户配置每段 50/60 却出现 100+ 字语音任务的根因）。
@@ -600,51 +650,86 @@ class TtsEngine:
             return [c for c in chunks if c]
         cap = max_len if max_len and max_len > 0 else 0
         out: list = []
+        effs: list = []  # 与 out 平行保存各段有效字数，避免重复计算
         for c in chunks:
             c = (c or "").strip()
             if not c:
                 continue
+            e = _effective_len(c)
             if not out:
                 # 首段直接保留；偏短时等下一段合并（由下方 prev < min_len 分支处理）
                 out.append(c)
+                effs.append(e)
             else:
-                prev = out[-1]
-                if (len(prev) < min_len or len(c) < min_len) and (
-                    cap <= 0 or len(prev) + len(c) <= cap
+                prev_eff = effs[-1]
+                if (prev_eff < min_len or e < min_len) and (
+                    cap <= 0 or prev_eff + e <= cap
                 ):
                     # 前一段或本段偏短：合并，避免「哈哈。」这类孤立短段（受 cap 上限约束）
-                    out[-1] = prev + c
+                    out[-1] = out[-1] + c
+                    effs[-1] = prev_eff + e
                 else:
                     out.append(c)
+                    effs.append(e)
         # 若末段仍短于 min_len（后面没段可并），并入前一段（同样受 cap 上限约束）
-        if len(out) >= 2 and len(out[-1]) < min_len:
-            if cap <= 0 or len(out[-2]) + len(out[-1]) <= cap:
+        if len(out) >= 2 and effs[-1] < min_len:
+            if cap <= 0 or effs[-2] + effs[-1] <= cap:
                 out[-2] = out[-2] + out[-1]
+                effs[-2] += effs[-1]
                 out.pop()
+                effs.pop()
         return [c for c in out if c]
 
+    @staticmethod
+    def _hard_slice_eff(seg: str, cap: int) -> list:
+        """按「有效字数」把一段文本硬切成若干片（标记不计入、永不从标记中间切断）。"""
+        w = [1] * len(seg)
+        for m in MARKUP_WHITELIST_RE.finditer(seg):
+            for i in range(m.start(), m.end()):
+                w[i] = 0
+        pieces: list = []
+        cur: list = []
+        eff = 0
+        for ch, weight in zip(seg, w):
+            if weight and eff >= cap:
+                pieces.append("".join(cur))
+                cur = []
+                eff = 0
+            cur.append(ch)
+            eff += weight
+        if cur:
+            pieces.append("".join(cur))
+        return [p for p in pieces if p.strip()]
+
     def _legacy_split(self, text: str) -> list:
-        """旧分段逻辑（segment_len 关闭时回退）：按句边界切，超 max_text_len 则硬切。"""
+        """旧分段逻辑（segment_len 关闭时回退）：按句边界切，超 max_text_len 则硬切。
+
+        长度按「有效字数」（剔除副语言标记后）计算。
+        """
         cap = self._legacy_window()
         if cap <= 0:
             return [text]
         chunks: list = []
         buf = ""
+        buf_eff = 0
         for seg in re.split(r"(?<=[。！？!?\n])", text):
             seg = seg.strip()
             if not seg:
                 continue
-            if len(buf) + len(seg) <= cap:
+            seg_eff = _effective_len(seg)
+            if buf_eff + seg_eff <= cap:
                 buf += seg
+                buf_eff += seg_eff
             else:
                 if buf:
                     chunks.append(buf)
-                if len(seg) > cap:
-                    for i in range(0, len(seg), cap):
-                        chunks.append(seg[i : i + cap])
+                if seg_eff > cap:
+                    chunks.extend(self._hard_slice_eff(seg, cap))
                     buf = ""
+                    buf_eff = 0
                 else:
                     buf = seg
+                    buf_eff = seg_eff
         if buf:
             chunks.append(buf)
         return chunks
