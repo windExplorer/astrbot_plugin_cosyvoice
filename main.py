@@ -37,7 +37,7 @@ except Exception:  # noqa: BLE001
     LLMResponse = object  # type: ignore
 
 from .core.tts_engine import TtsEngine, is_speakable, clean_media_placeholders, clean_tts_text, is_error_text
-from .core.markup import inject_markup, MARKUP_WHITELIST_RE
+from .core.markup import MARKUP_WHITELIST_RE
 from .core.webapi import register_web_apis
 from .core.translator import Translator
 from .cosyvoice.client import CosyVoiceClient, CosyVoiceServerError, QueueFullError
@@ -1154,12 +1154,11 @@ class CosyVoicePlugin(Star):
         # 会霸占队列几十分钟。超过 _BG_MAX_SECS 放弃剩余段（抢占机制之外的双保险）。
         _bg_start = time.monotonic()
         # 实际合成的文本：audio_text 为译文（翻译命中时）或剥离括号的原文；
-        # 空则无正文可念（纯括号），跳过合成
+        # 空则无正文可念（纯括号），跳过合成。
+        # 这里【保持干净文本】：副语言标记由引擎在【分段之后】逐段注入
+        # （synthesize / iter_segment_* 内部统一处理），保证语音分段与文字分段
+        # 用的是同一套边界（都按干净文本算字数），也避免标记撑大字数导致误切。
         synth_text = audio_text if audio_text is not None else display_text
-        vlang = self.engine.voice_language(voice)
-        synth_text = inject_markup(
-            synth_text, vlang, self.config, voice=self.engine.voices.get(voice)
-        )
         if not synth_text.strip():
             logger.info("[cosyvoice] 正文仅含括号内容，跳过语音合成（括号内容已按模式单独发送）")
             self._mark_server_ok()
@@ -1169,8 +1168,8 @@ class CosyVoicePlugin(Star):
             f"[cosyvoice] 后台合成开始 | send_mode={send_mode} merge={merge} "
             f"text_in_chain={text_in_chain} 文本长度={len(display_text)}字"
         )
-        # 排查日志：完整打印送入合成的文本（含标记注入后的形态），便于核对分段/剥括号是否有误
-        logger.info(f"[cosyvoice] 合成文本={synth_text!r}")
+        # 排查日志：打印送入合成的【干净文本】（标记形态由引擎逐段打印）
+        logger.info(f"[cosyvoice] 合成文本(干净)={synth_text!r}")
         # 文字与语音的发送先后：true=每段先语音后文字（先听后读）；false=先文字后语音（原行为）。
         # 仅影响不合并 both（逐段发送）模式。
         text_after_voice = bool(self.config.get("text_after_voice", True))
@@ -1201,14 +1200,11 @@ class CosyVoicePlugin(Star):
                     text_sent = False  # 文字是否已发出（语音失败也补发文字）——已发则冷却回退不再补发
                     for orig, trans in seg_items:
                         disp = trans if tmode == "translated" else (orig if bilingual else (f"{trans}\n中文：{orig}" if trans != orig else orig))
-                        # 仅语音文本注入标记（换气/音效）；展示文字 disp 不带标记
-                        trans_voiced = inject_markup(
-                            trans, vlang, self.config, voice=self.engine.voices.get(voice)
-                        )
+                        # 标记由引擎在分段之后逐段注入：这里传【干净译文】，展示文字 disp 不带标记
                         if text_after_voice:
                             # 先语音后文字：语音成功先发语音，再发对应文字；语音失败也补发文字（不丢）
                             if _has_foreign(trans):
-                                wav = await self.engine.synthesize(trans_voiced, voice, pre_translated=True)
+                                wav = await self.engine.synthesize(trans, voice, pre_translated=True)
                                 if wav:
                                     sent_any = True
                                     audio.schedule_cleanup(wav)
@@ -1235,7 +1231,7 @@ class CosyVoicePlugin(Star):
                                 if not await self._realtime_send(event, [Comp.Plain(disp)]):
                                     logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
                             if _has_foreign(trans):
-                                wav = await self.engine.synthesize(trans_voiced, voice, pre_translated=True)
+                                wav = await self.engine.synthesize(trans, voice, pre_translated=True)
                                 if wav:
                                     sent_any = True
                                     audio.schedule_cleanup(wav)
@@ -1273,9 +1269,11 @@ class CosyVoicePlugin(Star):
                     # 分段源是「含括号的原文」base_text（用户要看到括号，不再从正文删括号）；
                     # 每个文字段的语音文本由该段自身派生（skip_bracket_tts 时剥离本段括号），
                     # 保证语音不念括号、文字带括号，且文字/语音严格同段一一对应。
-                    # 副语言标记（[breath]/[laughter] 等）只服务语音合成、由 inject_markup
-                    # 注入合成文本，不进入展示文字（展示文字为模型原样）。
+                    # 副语言标记（[breath]/[laughter] 等）只服务语音合成：由引擎在【分段之后】
+                    # 逐段注入（见 TtsEngine._inject），既不进展示文字，也不参与分段字数计算。
                     base_text = self._clean_display(display_text)
+                    # 文字与语音用的是同一套分段（都基于这份干净文本）：段数天然一致，
+                    # 不会再出现「文字 1 段、语音 2 条」。
                     segs = self.engine.split_text(base_text)
                     # 排查日志：完整打印分段结果（repr 保留空白/换行边界），便于核对分段是否有误
                     seg_preview = " | ".join(f"段{i + 1}:{s!r}" for i, s in enumerate(segs))
@@ -1299,12 +1297,9 @@ class CosyVoicePlugin(Star):
                             seg_audio = vseg
                             if bilingual:
                                 seg_audio = _strip_chinese(seg_audio)
-                            seg_audio = inject_markup(
-                                seg_audio, vlang, self.config,
-                                voice=self.engine.voices.get(voice),
-                            )
-                            # 排查日志：每段的文字与对应语音文本，逐一可对证
-                            logger.info(f"[cosyvoice] 段{i + 1} | 文字={seg!r} 语音={vseg!r}")
+                            # 标记不在这里注入：交给引擎在分段之后逐段注入（_inject）
+                            # 排查日志：每段的文字与对应语音文本（干净文本），逐一可对证
+                            logger.info(f"[cosyvoice] 段{i + 1} | 文字={seg!r} 语音={seg_audio!r}")
                             seg_has_voice = bool(seg_audio.strip())
                             if text_after_voice:
                                 # 先语音后文字：语音成功先发语音，再发对应文字；语音失败也补发文字（不丢）
@@ -1568,22 +1563,13 @@ class CosyVoicePlugin(Star):
         - ``whole``：整段一次合成、只发一条语音（内部仍会切分拼接防超长）；
         - ``newline``：按换行符分块，每块一条语音（过短的块并入相邻块）。
 
-        处理顺序（每一步都不能换位）：
-        1) 分块——副语言标记在分块【之后】才注入：[breath] 这类标记本身占字数，若先注入
-           再判断「块是否过短」，1 字的「嗯」会因带上标记被算成长块，失去短块合并效果；
-        2) 翻译——只翻【纯文本】。若先注入标记再翻译，`[breath]` 会被整段送进翻译接口，
-           译文中的标记可能被改写/翻译/删除，服务端认不出就当普通文本念出来；
-        3) 注入标记，合成时 pre_translated=True（避免二次翻译）。
+        处理顺序：1) 按模式分块（干净文本，标记不占字数）；2) 翻译只翻【纯文本】——
+        若先注入标记再翻译，`[breath]` 会被送进翻译接口、可能被改写/删除；
+        3) 副语言标记由引擎在分段之后逐段注入（synthesize 内部统一处理）。
         """
-        vlang = self.engine.voice_language(voice)
         for block in self._cmd_blocks(text, mode):
             block_text = await self.engine.translate_for_voice(block, voice)
-            voiced = inject_markup(
-                block_text, vlang, self.config, voice=self.engine.voices.get(voice)
-            )
-            # 排查日志：完整打印送入服务端的合成文本（标记是否完整、是否被改写一眼可查）
-            logger.info(f"[cosyvoice] 指令合成文本={voiced!r}")
-            path = await self.engine.synthesize(voiced, voice, pre_translated=True)
+            path = await self.engine.synthesize(block_text, voice, pre_translated=True)
             if path:
                 yield path
 
@@ -1942,18 +1928,14 @@ class CosyVoicePlugin(Star):
         text = clean_tts_text(text)
 
         target_voice = voice or self._session_voice(event)
-        # 先翻译（纯文本）再注入副语言标记，合成时 pre_translated=True：与自动语音链路一致，
+        # 先翻译（干净文本）；标记由引擎在分段之后逐段注入，合成时 pre_translated=True：
         # 避免 `[breath]` 这类标记被整段送进翻译接口改写/翻译后，服务端认不出而当文本念出来。
         plain_text = await self.engine.translate_for_voice(text.strip(), target_voice)
-        tts_text = inject_markup(
-            plain_text, self.engine.voice_language(target_voice), self.config,
-            voice=self.engine.voices.get(target_voice),
-        )
-        logger.info(f"[cosyvoice] text_to_speech 合成文本={tts_text!r}")
+        logger.info(f"[cosyvoice] text_to_speech 合成文本(干净)={plain_text!r}")
         merge = bool(self.config.get("segment_merge", False))
         try:
             if merge:
-                path = await self.engine.synthesize(tts_text, target_voice, pre_translated=True)
+                path = await self.engine.synthesize(plain_text, target_voice, pre_translated=True)
                 if not path:
                     await self._realtime_send(event, [Comp.Plain("话到嘴边卡壳了，这次没念出来，待会儿再试试？")])
                     return "语音合成失败，已告知用户。"
@@ -1969,7 +1951,7 @@ class CosyVoicePlugin(Star):
                 # 不合并：边合成边逐段主动发送（每段独立一条消息，服务端返回一段即发一段）
                 sent = False
                 sent_ok = False
-                async for wav in self.engine.iter_segment_wavs(tts_text, target_voice, pre_translated=True):
+                async for wav in self.engine.iter_segment_wavs(plain_text, target_voice, pre_translated=True):
                     sent = True
                     if await self._realtime_send(event, [Comp.Record(file=wav, url=wav)]):
                         sent_ok = True

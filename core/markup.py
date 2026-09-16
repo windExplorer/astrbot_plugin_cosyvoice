@@ -16,13 +16,18 @@ SPECIAL_TOKENS = [
     "laugh", "chuckle", "snicker", "sob", "groan",
 ]
 _TOK_ALT = "|".join(re.escape(t) for t in SPECIAL_TOKENS)
+# 分支必须显式分组：`"\[" + ALT + "\]"` 这种拼接会让 `|` 的优先级最低——`\]` 只绑到
+# 最后一个分支，正则实际变成「`\[laughter` | 裸词 breath | … | 裸词 groan]`」：
+#   · `[breath]` 只被删掉里面的单词、留下 `[]`（长度/白名单判定全错）；
+#   · 正文里的普通英文单词（laugh / noise / mn…）会被误当成标记。
+_TOK = "(?:" + _TOK_ALT + ")"
 # 英文方括号：[token]
-_BRACKET_TOKEN_RE = re.compile(r"\[" + _TOK_ALT + r"\]")
+_BRACKET_TOKEN_RE = re.compile(r"\[" + _TOK + r"\]")
 # 英文尖括号：<laughter>...</laughter>
-_ANGLE_TOKEN_RE = re.compile(r"<" + _TOK_ALT + r">.*?</" + _TOK_ALT + r">")
+_ANGLE_TOKEN_RE = re.compile(r"<" + _TOK + r">.*?</" + _TOK + r">")
 # 合并：供 _strip_brackets 跳过这些标记（避免被当「不朗读括号」误删）
 MARKUP_WHITELIST_RE = re.compile(
-    r"\[" + _TOK_ALT + r"\]|<" + _TOK_ALT + r">.*?</" + _TOK_ALT + r">"
+    r"\[" + _TOK + r"\]|<" + _TOK + r">.*?</" + _TOK + r">"
 )
 
 # ---------- 规则 1：标点换气 ----------

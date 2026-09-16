@@ -9,7 +9,7 @@ import asyncio
 from astrbot.api import logger
 
 from ..cosyvoice.client import CosyVoiceClient, CosyVoiceServerError, QueueFullError
-from .markup import MARKUP_WHITELIST_RE, SPECIAL_TOKENS
+from .markup import SPECIAL_TOKENS, inject_markup
 from ..utils import audio
 
 # 插件根目录（core/ 的上一级），用于解析相对参考音频路径
@@ -59,49 +59,6 @@ _TAG_TAIL_RE = re.compile(r"\[([A-Za-z_]*)$")
 
 # 「整段只有副语言标记」形态（允许前后空白）：如 `[breath]`、`[quick_breath][breath]`。
 _MARKUP_ONLY_RE = re.compile(r"^(?:\s*\[[A-Za-z_]+\])+\s*$")
-
-
-def _effective_len(s: str) -> int:
-    """有效字数：剔除副语言标记后的长度。
-
-    标记（[breath]/[quick_breath]/[sigh] 等）只给模型看，**不该计入「每段 N 字」的
-    额度**：48 字的正文注入标记后会膨胀到近百字，若按原始字符数分段，用户配置的
-    窗口会被标记挤爆（48 字被当成 98 字、明明不超限却被切开）。
-    """
-    return len(MARKUP_WHITELIST_RE.sub("", s or ""))
-
-
-def _eff_prefix(text: str) -> list:
-    """有效字数前缀和：pre[i] = text[:i] 中非标记字符的个数（标记字符权重 0）。"""
-    n = len(text)
-    w = [1] * n
-    for m in MARKUP_WHITELIST_RE.finditer(text):
-        for i in range(m.start(), m.end()):
-            w[i] = 0
-    pre = [0] * (n + 1)
-    acc = 0
-    for i in range(n):
-        acc += w[i]
-        pre[i + 1] = acc
-    return pre
-
-
-def _eff_seek(pre: list, start: int, budget: int) -> int:
-    """从 start 起推进到「有效字数恰好用完 budget」的原文位置。
-
-    返回满足 ``pre[pos] - pre[start] <= budget`` 的最大 pos：标记字符权重为 0，
-    二分会停在标记末尾——窗口/硬切边界不会落在标记中间，整个标记归入本段。
-    """
-    n = len(pre) - 1
-    target = pre[start] + max(0, budget)
-    lo, hi = start, n
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if pre[mid] <= target:
-            lo = mid
-        else:
-            hi = mid - 1
-    return lo
 
 
 def _has_open_markup_tail(s: str) -> bool:
@@ -468,9 +425,13 @@ class TtsEngine:
         return f"[{esc}]"
 
     def split_text(self, text: str) -> list:
-        """分段统一入口：切分 → 接回被切开的标记 → 吸收纯标记段（见各 helper）。
+        """分段统一入口。**输入必须是干净文本（不含副语言标记）**：文字分段与语音分段
+        都调用本方法，因此两者天然用同一套边界、同一套字数——语音不会比文字多切几段。
 
-        所有合成路径（合并/逐段/指令/工具）都经由本方法取分段，故标记保护收口在这里。
+        副语言标记由 synthesize / iter_segment_* 在分段【之后】逐段注入（_inject），
+        绝不参与分段字数计算（否则 48 字正文带标记后变 98 字，会被窗口误切成多段）。
+        本入口末尾的两道保护（_merge_broken_markup / _absorb_lone_markup）只为兜住
+        「输入文本里本就带着标记」的边缘情况（如模型自己输出了 [breath]）。
         """
         return self._absorb_lone_markup(self._merge_broken_markup(self._split_text_raw(text)))
 
@@ -528,21 +489,20 @@ class TtsEngine:
             chunks = self._legacy_split(text)
         else:
             # 新分段逻辑：窗口上界 = hi，首段可用独立的 segment_first_len 区间。
-            # 在窗口内命中的最后一个分段符号处切；min(lo) 作为短段合并下限。
+            # 在 [start, start+hi) 内命中的最后一个分段符号处切；min(lo) 作为短段合并下限。
             # max_text_len 不参与窗口，仅作 truncate 模式下「无标点硬切」的兜底上限。
-            # 窗口推进按「有效字数」（剔除副语言标记后）计算：标记只服务合成、不占
-            # 每段字数额度，否则 48 字正文注入标记后变成 98 字，会被窗口误切成多段。
+            # 注意：本方法只应收到【干净文本】（副语言标记在分段之后才逐段注入），
+            # 所以窗口/硬切直接用字符数即可，不存在「标记挤爆字数窗口」的问题。
             hard_cap = self._seg_hard_cap()
             punct = self._seg_punct_class()
             punct_re = re.compile(punct)
             n = len(text)
-            pre = _eff_prefix(text)
             chunks: list = []
             start = 0
             is_first = True
             while start < n:
                 fw_lo, fw_hi = (self._seg_first_window() if is_first else (lo, hi))
-                end = _eff_seek(pre, start, fw_hi)
+                end = min(start + fw_hi, n)
                 # 在 [start, end) 窗口内找【最后一个】命中的分段符号：
                 # 取窗口内字数范围内最后一个标点，以它前面（含符号）为一段。
                 last = None
@@ -556,15 +516,13 @@ class TtsEngine:
                     start = cut
                 else:
                     mode = self._seg_nopunct_mode("first" if is_first else "body")
-                    # seek 模式受 hard_cap 约束：剩余有效长度或 seek 目标超出硬上限时放弃
-                    # seek，退回 truncate 硬切——否则无标点长文（错误信息/英文等）会 seek 出
+                    # seek 模式受 hard_cap 约束：剩余长度或 seek 目标超出硬上限时放弃 seek，
+                    # 退回 truncate 硬切——否则无标点长文（错误信息/英文等）会 seek 出
                     # 远超配置窗口的超长段
-                    if mode == "seek" and not (hard_cap > 0 and pre[n] - pre[start] > hard_cap):
+                    if mode == "seek" and not (hard_cap > 0 and n - start > hard_cap):
                         # 窗口内无标点：往后（超出窗口）找第一个命中的分段符号
                         nxt = punct_re.search(text, end)
-                        if nxt is not None and not (
-                            hard_cap > 0 and pre[nxt.end()] - pre[start] > hard_cap
-                        ):
+                        if nxt is not None and not (hard_cap > 0 and nxt.end() - start > hard_cap):
                             cut = nxt.end()
                             seg = text[start:cut].strip()
                             if seg:
@@ -578,7 +536,7 @@ class TtsEngine:
                             start = n
                     else:
                         # truncate：窗口内无标点，直接在窗口末（受 hard_cap 兜底）硬切
-                        cut = min(end, _eff_seek(pre, start, hard_cap)) if hard_cap > 0 else end
+                        cut = min(end, start + hard_cap) if hard_cap > 0 else end
                         seg = text[start:cut].strip()
                         if seg:
                             chunks.append(seg)
@@ -640,96 +598,63 @@ class TtsEngine:
     def _merge_short(chunks: list, min_len: int, max_len: int = 0) -> list:
         """把 < min_len 字的短段并入相邻段，避免「哈哈。」这类超短句单独成段。
 
-        长度一律按「有效字数」（剔除副语言标记后，_effective_len）计算：标记不计入
-        每段字数额度，否则带标记的段会被高估、该合并的不合并。
         max_len > 0 时为合并结果设上限：并入会使结果超过 max_len 则放弃合并、保持独立段。
         否则长段会不断吸附 <min_len 的短段越滚越大，滚出远超配置窗口的 100+ 字超长段
         （用户配置每段 50/60 却出现 100+ 字语音任务的根因）。
+        长度按纯文本字符数计算——本函数只处理【干净文本】（标记在分段之后才注入）。
         """
         if min_len <= 0:
             return [c for c in chunks if c]
         cap = max_len if max_len and max_len > 0 else 0
         out: list = []
-        effs: list = []  # 与 out 平行保存各段有效字数，避免重复计算
         for c in chunks:
             c = (c or "").strip()
             if not c:
                 continue
-            e = _effective_len(c)
             if not out:
                 # 首段直接保留；偏短时等下一段合并（由下方 prev < min_len 分支处理）
                 out.append(c)
-                effs.append(e)
             else:
-                prev_eff = effs[-1]
-                if (prev_eff < min_len or e < min_len) and (
-                    cap <= 0 or prev_eff + e <= cap
+                prev = out[-1]
+                if (len(prev) < min_len or len(c) < min_len) and (
+                    cap <= 0 or len(prev) + len(c) <= cap
                 ):
                     # 前一段或本段偏短：合并，避免「哈哈。」这类孤立短段（受 cap 上限约束）
-                    out[-1] = out[-1] + c
-                    effs[-1] = prev_eff + e
+                    out[-1] = prev + c
                 else:
                     out.append(c)
-                    effs.append(e)
         # 若末段仍短于 min_len（后面没段可并），并入前一段（同样受 cap 上限约束）
-        if len(out) >= 2 and effs[-1] < min_len:
-            if cap <= 0 or effs[-2] + effs[-1] <= cap:
+        if len(out) >= 2 and len(out[-1]) < min_len:
+            if cap <= 0 or len(out[-2]) + len(out[-1]) <= cap:
                 out[-2] = out[-2] + out[-1]
-                effs[-2] += effs[-1]
                 out.pop()
-                effs.pop()
         return [c for c in out if c]
-
-    @staticmethod
-    def _hard_slice_eff(seg: str, cap: int) -> list:
-        """按「有效字数」把一段文本硬切成若干片（标记不计入、永不从标记中间切断）。"""
-        w = [1] * len(seg)
-        for m in MARKUP_WHITELIST_RE.finditer(seg):
-            for i in range(m.start(), m.end()):
-                w[i] = 0
-        pieces: list = []
-        cur: list = []
-        eff = 0
-        for ch, weight in zip(seg, w):
-            if weight and eff >= cap:
-                pieces.append("".join(cur))
-                cur = []
-                eff = 0
-            cur.append(ch)
-            eff += weight
-        if cur:
-            pieces.append("".join(cur))
-        return [p for p in pieces if p.strip()]
 
     def _legacy_split(self, text: str) -> list:
         """旧分段逻辑（segment_len 关闭时回退）：按句边界切，超 max_text_len 则硬切。
 
-        长度按「有效字数」（剔除副语言标记后）计算。
+        只处理【干净文本】，故长度即字符数。
         """
         cap = self._legacy_window()
         if cap <= 0:
             return [text]
         chunks: list = []
         buf = ""
-        buf_eff = 0
         for seg in re.split(r"(?<=[。！？!?\n])", text):
             seg = seg.strip()
             if not seg:
                 continue
-            seg_eff = _effective_len(seg)
-            if buf_eff + seg_eff <= cap:
+            if len(buf) + len(seg) <= cap:
                 buf += seg
-                buf_eff += seg_eff
             else:
                 if buf:
                     chunks.append(buf)
-                if seg_eff > cap:
-                    chunks.extend(self._hard_slice_eff(seg, cap))
+                if len(seg) > cap:
+                    for i in range(0, len(seg), cap):
+                        chunks.append(seg[i : i + cap])
                     buf = ""
-                    buf_eff = 0
                 else:
                     buf = seg
-                    buf_eff = seg_eff
         if buf:
             chunks.append(buf)
         return chunks
@@ -750,12 +675,12 @@ class TtsEngine:
             return text
 
     async def translate_for_voice(self, text: str, voice_name: str | None = None) -> str:
-        """按音色语种翻译【纯文本】（供指令/工具路径在注入副语言标记之前调用）。
+        """按音色语种翻译【纯文本】（翻译只作用于干净文本，标记在分段/翻译之后才注入）。
 
         顺序很关键：标记必须在翻译**之后**注入。若先注入再翻译（早期指令/工具路径
         就是这样：注入标记后调用未带 pre_translated 的 synthesize），整段（含
         `[breath]` 这类标记）会被送进翻译接口——标记可能被改写/翻译/删除，服务端
-        认不出就成了普通文本被念出来。自动语音链路本就「先翻译后注入」，此处对齐。
+        认不出就成了普通文本被念出来。
         """
         return await self._maybe_translate(text, voice_lang=self.voice_language(voice_name))
 
@@ -766,8 +691,26 @@ class TtsEngine:
             return None
         return (self.voices.get(name) or {}).get("language") or None
 
+    def _inject(self, seg: str, voice_name: str | None) -> str:
+        """为一【段】文本注入副语言标记（分段之后调用）。
+
+        统一入口的意义：① 分段只吃干净文本，语音与文字用同一套边界；
+        ② 标记不影响分段字数，不会把 48 字的正文撑成 98 字被窗口误切；
+        ③ 音色级 `markup=false` 开关按**实际生效的音色**判定（调用方传的 voice 可能
+           为 None=用默认音色，此前会让该开关失效）。
+        """
+        name, _, _ = self.resolve_voice(voice_name)
+        if name is None:
+            return seg
+        vlang = (self.voices.get(name) or {}).get("language") or None
+        return inject_markup(seg, vlang, self.config, voice=self.voices.get(name))
+
     async def synthesize(self, text: str, voice_name: str | None = None, *, pre_translated: bool = False) -> str | None:
-        """合成文本并返回 wav 文件路径；无可用音色或失败返回 None。"""
+        """合成文本并返回 wav 文件路径；无可用音色或失败返回 None。
+
+        ``text`` 必须是【干净文本】（不含副语言标记）：本方法在干净文本上分段，
+        再对每段调用 `_inject` 注入标记后才请求服务端。
+        """
         self.last_failure = ""
         self.last_failure_kind = ""
         name, prompt_wav, prompt_text = self.resolve_voice(voice_name)
@@ -800,15 +743,17 @@ class TtsEngine:
             kwargs = self._wav_kwargs(prompt_wav, prompt_text)
             total = len(chunks)
             for i, ch in enumerate(chunks, 1):
+                # 标记在分段之后逐段注入（分段用的是干净文本，与文字分段同一套边界）
+                voiced = self._inject(ch, name)
                 t0 = time.time()
                 logger.info(
-                    f"[cosyvoice] 合成 {i}/{total}: \"{ch[:40]}{'...' if len(ch)>40 else ''}\""
+                    f"[cosyvoice] 合成 {i}/{total}: \"{voiced[:40]}{'...' if len(voiced)>40 else ''}\""
                 )
                 async with self._sem:
                     # 整轮只有第一段做「排队过长」判定（探路）：通过则后续段照常合成，
                     # 避免「前半段发出、后半段因排队被弃」的半截语音（合并模式同理）。
                     pcm = await self.client.synthesize(
-                        ch, mode="zero_shot", check_queue=(i == 1), **kwargs
+                        voiced, mode="zero_shot", check_queue=(i == 1), **kwargs
                     )
                 if pcm:
                     dt = (time.time() - t0) * 1000
@@ -839,10 +784,13 @@ class TtsEngine:
         """逐段合成，依次 yield (段文字, wav路径或None)。
 
         用于「不合并」模式：每段生成完即可发给用户，无需等全部完成。
-        - 合成成功：yield (ch, wav路径)；
+        - 合成成功：yield (段文字, wav路径)；段文字为【干净文本】（不含标记，标记
+          在分段后逐段注入，仅进合成、不进展示）；
         - 单段推理失败：yield (ch, None)，**文字仍返回**，由调用方保证文字不丢
           （语音缺段但文字完整）。
         服务器失联（CosyVoiceServerError）/ 繁忙（QueueFullError）会向上抛出。
+
+        ``text`` 必须是【干净文本】：分段在干净文本上做，与文字分段同一套边界。
         """
         name, prompt_wav, prompt_text = self.resolve_voice(voice_name)
         if name is None:
@@ -863,15 +811,17 @@ class TtsEngine:
         total = len(chunks)
         for i, ch in enumerate(chunks, 1):
             try:
+                # 标记在分段之后逐段注入（分段用的是干净文本，与文字分段同一套边界）
+                voiced = self._inject(ch, name)
                 t0 = time.time()
                 logger.info(
-                    f"[cosyvoice] 合成 {i}/{total}: \"{ch[:40]}{'...' if len(ch)>40 else ''}\""
+                    f"[cosyvoice] 合成 {i}/{total}: \"{voiced[:40]}{'...' if len(voiced)>40 else ''}\""
                 )
                 async with self._sem:
                     # 整轮只有第一段做「排队过长」判定（探路）：通过则后续段照常合成，
                     # 避免「前半段发出、后半段因排队被弃」的半截语音（不合并模式）。
                     pcm = await self.client.synthesize(
-                        ch, mode="zero_shot", check_queue=(i == 1), **kwargs
+                        voiced, mode="zero_shot", check_queue=(i == 1), **kwargs
                     )
             except CosyVoiceServerError:
                 raise
