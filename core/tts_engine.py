@@ -456,6 +456,88 @@ class TtsEngine:
 
         return self._split_window(text)
 
+    def split_text_pairs(self, text: str) -> list:
+        """分段并配对：返回 ``[(语音段, [文字段, ...]), ...]``（both 逐段发送用）。
+
+        语音段与 :meth:`split_text` 的结果**完全一致**（换行短块合并照旧：「嗯」「好的」
+        这类短行仍并入相邻块合成，不单独占一条语音）；文字段在
+        ``text_split_keep_newline=true``（默认）下**不做换行短块合并**——每个原始换行行
+        各自走窗口切分。这样聊天记录里的文字仍按原始换行逐条发出，而不是随合并块连成
+        一整段（合并是直接拼接，连换行符都不会留下）。
+
+        文字段按「去空白字符轴」归入其起点所在的语音段，因此文字段数可以多于语音段数，
+        顺序仍与语音一一对应；任何异常都退化为一一对应（绝不丢文字、不错位）。
+        """
+        voice_chunks = self.split_text(text)
+        if not voice_chunks:
+            return []
+        one_to_one = [(c, [c]) for c in voice_chunks]
+        # 关掉换行分段（或该特性关闭）时，文字与语音保持原来的一一对应
+        if not self._keep_newline_text() or not self._split_by_newline():
+            return one_to_one
+        rows = [r.strip() for r in re.split(r"\n+", text or "") if r.strip()]
+        if len(rows) <= 1:
+            return one_to_one
+        text_chunks: list = []
+        for row in rows:
+            text_chunks.extend(self._split_window(row))
+        text_chunks = self._absorb_lone_markup(self._merge_broken_markup(text_chunks))
+        # 没有发生短块合并（两套分段结果相同）→ 退化为一一对应
+        if not text_chunks or text_chunks == voice_chunks:
+            return one_to_one
+        return self._pair_voice_text(voice_chunks, text_chunks)
+
+    def _keep_newline_text(self) -> bool:
+        """配置项 text_split_keep_newline：文字是否保持「按原始换行分段」（默认开启）。
+
+        开启（默认）：语音照旧把过短的换行行并入相邻块合成，但**文字**仍按原始换行
+        逐条发送（短行不会被并进上一段文字里）。
+        关闭：回到旧行为——文字随语音一起用合并后的分段（短行被并入，且因合并是直接
+        拼接，两行文字会连成一句）。
+        """
+        return bool(self.config.get("text_split_keep_newline", True))
+
+    @staticmethod
+    def _ns_spans(chunks: list) -> tuple:
+        """把各段映射到「去空白字符轴」上的半开区间（跨套分段配对的公共基准）。
+
+        语音段与文字段都切自同一份干净文本（只是切点不同），剔掉空白后的字符序列
+        一致，因此用去空白后的字符位置即可判定「某文字段落在哪个语音段区间内」。
+        """
+        spans: list = []
+        pos = 0
+        for c in chunks:
+            n = len(re.sub(r"\s+", "", c or ""))
+            spans.append((pos, pos + n))
+            pos += n
+        return spans, pos
+
+    @classmethod
+    def _pair_voice_text(cls, voice_chunks: list, text_chunks: list) -> list:
+        """把文字段归入「其起点所在的语音段」，返回 ``[(语音段, [文字段...]), ...]``。
+
+        两套分段的去空白总长必须一致才配对；不一致说明切分有偏差（理论上不该发生），
+        直接退化为一一对应——宁可回到旧行为，也不让文字丢段或错位。
+        """
+        vspans, vtotal = cls._ns_spans(voice_chunks)
+        tspans, ttotal = cls._ns_spans(text_chunks)
+        if vtotal <= 0 or vtotal != ttotal:
+            return [(c, [c]) for c in voice_chunks]
+        groups: list = []
+        ti = 0
+        for i, (_vs, ve) in enumerate(vspans):
+            members: list = []
+            while ti < len(text_chunks) and tspans[ti][0] < ve:
+                members.append(text_chunks[ti])
+                ti += 1
+            groups.append((voice_chunks[i], members or [voice_chunks[i]]))
+        # 兜底：尾部未能归属的文字段并入最后一组，保证文字不丢
+        while ti < len(text_chunks):
+            v, members = groups[-1]
+            groups[-1] = (v, members + [text_chunks[ti]])
+            ti += 1
+        return groups
+
     def split_newline_blocks(self, text: str) -> list:
         """按换行切块，并把过短的块并入相邻块（供 split_text 预分段与 /tts1 指令共用）。
 

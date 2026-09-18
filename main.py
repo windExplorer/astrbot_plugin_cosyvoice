@@ -730,6 +730,26 @@ class CosyVoicePlugin(Star):
         )
         return False
 
+    async def _send_seg_texts(self, event: AstrMessageEvent, texts: list, no_text: bool) -> bool:
+        """逐条发送某一语音段对应的文字段（一般 1 条；换行短块合并后可能多条）。
+
+        返回是否真的发过文字（用于 text_sent 标记：已发过则冷却回退不再补发整条，
+        避免同一条内容在聊天里出现两遍）。no_text=True（图文消息）时一条都不发。
+        """
+        if no_text:
+            return False
+        sent = False
+        for text in texts:
+            if not (text or "").strip():
+                continue
+            sent = True
+            try:
+                if not await self._realtime_send(event, [Comp.Plain(text)]):
+                    logger.warning("[cosyvoice] 分段文字发送失败（已尝试补发）")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[cosyvoice] 分段文字发送异常（跳过）: {e}")
+        return sent
+
     # ---------- LLM 回复钩子：标记 + 关键词触发 ----------
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
@@ -1272,16 +1292,21 @@ class CosyVoicePlugin(Star):
                     # 副语言标记（[breath]/[laughter] 等）只服务语音合成：由引擎在【分段之后】
                     # 逐段注入（见 TtsEngine._inject），既不进展示文字，也不参与分段字数计算。
                     base_text = self._clean_display(display_text)
-                    # 文字与语音用的是同一套分段（都基于这份干净文本）：段数天然一致，
-                    # 不会再出现「文字 1 段、语音 2 条」。
-                    segs = self.engine.split_text(base_text)
+                    # 分段与配对：语音段与 split_text 完全一致（换行短块合并照旧）；文字段在
+                    # 「文字仍按换行分段」（text_split_keep_newline=true，默认）下不做换行短块
+                    # 合并——「嗯」「好的」这类短行仍并入相邻块合成，但文字仍按原始换行逐条发出，
+                    # 不会随合并块连成一整段（合并是直接拼接，连换行符都不会留下）。
+                    pairs = self.engine.split_text_pairs(base_text)
+                    segs = [v for v, _ in pairs]
                     # 排查日志：完整打印分段结果（repr 保留空白/换行边界），便于核对分段是否有误
                     seg_preview = " | ".join(f"段{i + 1}:{s!r}" for i, s in enumerate(segs))
                     logger.info(f"[cosyvoice] 文字分段 | 段数={len(segs)} 明细: {seg_preview}")
-                    if len(segs) > 1:
+                    # 语音只有 1 段、文字却有多段时（换行短行被合并）同样走逐段发送，
+                    # 否则文字会被整条发出、丢掉「按换行分段」的效果。
+                    if len(segs) > 1 or any(len(t) > 1 for _, t in pairs):
                         sent_any = False
                         text_sent = False  # 文字是否已发出（逐段补发）——已发则冷却回退不再补发
-                        for i, seg in enumerate(segs):
+                        for i, (seg, text_segs) in enumerate(pairs):
                             if time.monotonic() - _bg_start > 300:
                                 logger.warning("[cosyvoice] 后台任务超时（服务端积压>5分钟），放弃剩余段")
                                 break
@@ -1299,7 +1324,9 @@ class CosyVoicePlugin(Star):
                                 seg_audio = _strip_chinese(seg_audio)
                             # 标记不在这里注入：交给引擎在分段之后逐段注入（_inject）
                             # 排查日志：每段的文字与对应语音文本（干净文本），逐一可对证
-                            logger.info(f"[cosyvoice] 段{i + 1} | 文字={seg!r} 语音={seg_audio!r}")
+                            logger.info(
+                                f"[cosyvoice] 段{i + 1} | 文字={text_segs!r} 语音={seg_audio!r}"
+                            )
                             seg_has_voice = bool(seg_audio.strip())
                             if text_after_voice:
                                 # 先语音后文字：语音成功先发语音，再发对应文字；语音失败也补发文字（不丢）
@@ -1320,22 +1347,12 @@ class CosyVoicePlugin(Star):
                                         f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
                                     )
                                 # 纯括号段（无语音文本）：只发文字，不合成、不告警
-                                if not no_text:
+                                if await self._send_seg_texts(event, text_segs, no_text):
                                     text_sent = True
-                                    try:
-                                        if not await self._realtime_send(event, [Comp.Plain(seg)]):
-                                            logger.warning("[cosyvoice] 分段文字发送失败（已尝试补发）")
-                                    except Exception as e:  # noqa: BLE001
-                                        logger.warning(f"[cosyvoice] 分段文字发送异常（跳过）: {e}")
                             else:
                                 # 先文字后语音（原行为）
-                                if not no_text:
+                                if await self._send_seg_texts(event, text_segs, no_text):
                                     text_sent = True
-                                    try:
-                                        if not await self._realtime_send(event, [Comp.Plain(seg)]):
-                                            logger.warning("[cosyvoice] 分段文字发送失败（语音仍尝试）")
-                                    except Exception as e:  # noqa: BLE001
-                                        logger.warning(f"[cosyvoice] 分段文字发送异常（跳过）: {e}")
                                 wav = (
                                     await self.engine.synthesize(seg_audio, voice, pre_translated=True)
                                     if seg_has_voice else None
