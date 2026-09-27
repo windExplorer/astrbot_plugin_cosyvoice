@@ -215,3 +215,8 @@ frontend/dist/
 
 # 本地工具运行时元数据
 .reasonix/
+
+# 根目录误生成的 npm 锁文件（本仓库的 node 工程在 frontend/，其 package-lock.json
+# 需要入库；根目录没有 package.json，此处出现的 lock 是误跑 npm 产生的空壳，
+# 且会被打包脚本带进插件包，故忽略）
+/package-lock.json
