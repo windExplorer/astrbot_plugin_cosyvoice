@@ -174,7 +174,7 @@
     "title": "发送模式",
     "description": "语音发送方式",
     "options": ["both", "voice_only"],
-    "hint": "both=文本+语音都发（推荐，保证聊天记录文字不丢）；voice_only=只发语音（文字仍写入会话上下文）",
+    "hint": "both=文本+语音都发（推荐，保证聊天记录文字不丢）；voice_only=只发语音（文字仍写入会话上下文）。注意：带图片的回复（图文消息）不受此项影响——文字一律不单独发出，只发图片等媒体 + 语音。",
     "default": "both"
   },
   "text_after_voice": {
