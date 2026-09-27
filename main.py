@@ -936,17 +936,15 @@ class CosyVoicePlugin(Star):
         # voice_only 或 不合并 both 都从结果链移除，改由后台逐段发「文字段+语音段」。
         text_in_chain = bool(send_mode == "both" and merge)
 
-        # 图文消息（结果链含图片组件）：文字一律【不】随链发出、也不由后台单独补发——
-        # 只发图片等媒体 + 语音（v2.1.55）。此前（v2.1.40 起）是「文字保留在链上、与图片
-        # 一起发出」，但实际落到聊天里这条文字仍会被逐段补发拆成独立消息刷屏
-        # （用户反馈：图文消息别把文字拎出来单独发送，只发语音就行；文字再长也只发分段语音）。
-        # 位置要点：必须在冷却检查之前——否则冷却期提前 return，链上文字仍会随管线发出。
-        # text_in_chain 置 False（文字已不在链上）→ 语音彻底失败时 _fallback_text 仍会
-        # 补发一次文字兜底，避免用户连图带字什么都收不到。
+        # 图文消息（结果链含图片组件）：文字【保留】在结果链，与图片一起作为**一条**原样发出
+        # （用户要的形态：消息1 = 文字 + 图片；消息2/3/… = 分段语音），后台只补发语音、
+        # 绝不单独补发文字。
+        # 位置要点：必须放在冷却检查之前并置 text_in_chain=True——冷却期会提前 return，
+        # 此时若 text_in_chain 还是 False（不合并 both / voice_only），就会走 _fallback_text
+        # 把文字**单独**补发一条：这正是「图文消息里文字被拎出来单独发送」的根源。
         has_media = any(isinstance(c, Comp.Image) for c in chain)
         if has_media:
-            result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
-            text_in_chain = False
+            text_in_chain = True
 
         # 服务端熔断冷却期：不再向服务端发任何请求，直接回退文字，避免一直卡着连文字也不发。
         # 文字在结果链（合并 both）会正常发出；已移除（voice_only / 不合并 both）需补发回去。
@@ -1076,18 +1074,22 @@ class CosyVoicePlugin(Star):
                         # 逐段分支的行为：语音=译文+副语言标签；文字=译文 + 换行 + 中文：原文（一条发出）。
                         seg_items = [(full_text, translated)]
 
-        # 文字归属（v2.1.55）：
-        # - 图文消息（结果链含图片）：文字已在上面移除，只发媒体 + 语音，这里不再处理；
-        # - 不保留在链上（voice_only / 不合并 both）：移除链上文字，由后台补发「文字段+语音段」；
+        # 文字归属：
+        # - 图文消息（结果链含图片）：文字【保留】在结果链、与图片一起作为一条原样发出
+        #   （消息1），后台只补语音、不补文字（no_text=True）；
+        # - 不保留在链上（voice_only / 不合并 both）：移除链上文字，由后台发「文字段+语音段」；
         # - 保留在链上（合并 both）：按 translate_display_mode 改写展示文字
         #   （原文 / 译文 / 译文+换行+原文：）。
-        if not has_media:
-            if not text_in_chain:
-                result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
-            else:
-                for c in result.chain:
-                    if isinstance(c, Comp.Plain):
-                        c.text = self._clean_display(display_text)
+        if has_media:
+            for c in result.chain:
+                if isinstance(c, Comp.Plain):
+                    c.text = self._clean_display(display_text)
+        elif not text_in_chain:
+            result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
+        else:
+            for c in result.chain:
+                if isinstance(c, Comp.Plain):
+                    c.text = self._clean_display(display_text)
 
         # 括号内容不朗读：仅从「语音合成文本」剥离括号内容。
         # - 合并模式：文字留在结果链（含括号），语音不念，不单独补发；
@@ -1168,8 +1170,9 @@ class CosyVoicePlugin(Star):
         - 合并 voice_only：文字已移除，只补发整条语音，失败回退补发文字；
         - 不合并 both：文字已移除，先整条发「译文+换行+原文：」文字、再逐段发译文语音；
         - 不合并 voice_only：文字已移除，逐段只发语音，失败回退补发文字。
-        - no_text=True（图文消息）：只发语音，所有文字发送/补发一律跳过。文字此时已由
-          on_decorating_result 从结果链移除（v2.1.55），聊天里只会看到图片等媒体 + 语音。
+        - no_text=True（图文消息）：只补发语音，所有文字发送/补发一律跳过。文字此时已在
+          结果链上（与图片一起作为**一条**原样发出 = 消息1），聊天里不会再出现单独的
+          文字消息；这条语音即消息2/3/…（按分段逐条发）。
 
         bracket_text：skip_bracket_tts 生效时从原文提取的括号内容。逐段模式下分段是在
         「剥离括号后的文本」上做的，故正文任意一段都不含括号，括号内容随正文一起发出、
