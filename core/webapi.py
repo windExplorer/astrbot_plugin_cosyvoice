@@ -429,7 +429,9 @@ def _list_sessions(plugin):
                 "group_id": parsed["group_id"],
                 "user_id": parsed["user_id"],
                 "label": parsed["label"],
-                "nickname": plugin._nicknames.get(origin, ""),
+                "nickname": getattr(plugin, "_nicknames", {}).get(origin, ""),
+                # 群名（群聊才有；取不到时前端回退显示群号）
+                "group_name": getattr(plugin, "_group_names", {}).get(origin, ""),
                 "on": on,
                 "mode": mode,
                 "voice": plugin._voices.get(origin, "") or "默认",

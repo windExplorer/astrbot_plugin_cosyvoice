@@ -2,6 +2,22 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.3.0 (2026-09-28)
+
+- feat(WebUI): 会话列表显示 **QQ 昵称** 与 **群名**（会话页：群聊显示群名，私聊显示对方昵称）。
+  - **昵称此前一直取不到**：旧代码用 `getattr(event, "sender_name", "")`，但 `AstrMessageEvent`
+    **没有** `sender_name` 属性（框架只提供 `get_sender_name()` 方法）→ 永远拿到空串，昵称从未
+    记录成功。现在改走 `event.get_sender_name()`（框架里它的取值就是
+    `sender.card or sender.nickname`，群聊优先群名片、私聊是昵称）。
+  - **群名**新增记录与展示（`data/tts_groupnames.json`）：优先用 OneBot/NapCat **随消息下发的**
+    `message_obj.group.group_name`（框架适配器里就是 `abm.group.group_name = event.get("group_name")`），
+    消息里没带时**后台补查**一次 `event.get_group()`（aiocqhttp 下走 OneBot `get_group_info`）——
+    后台执行不阻塞回复，同一群只查一次；私聊不记录群名。
+  - 展示：群聊主标题 = 群名（取不到回退「群 群号」），副行 = 群号 + 「最近发言 <昵称>」+ 平台；
+    私聊主标题 = 对方昵称（取不到回退「QQ QQ 号」），副行 = QQ 号 + 平台。
+  - 会话列表接口新增 `group_name` 字段。
+- 版本 v2.2.2 -> v2.3.0。
+
 ## v2.2.2 (2026-09-28)
 
 - fix: 头像接口对齐同生态项目（`astrbot_plugin_box` / `astrbot_plugin_moe_star_whisper` 同款）。

@@ -210,9 +210,15 @@ class CosyVoicePlugin(Star):
         self._voices_lib = self._load_voices_lib()
         # WebUI 概览「最近事件」环形缓冲（进程内，不持久化；最多 20 条）
         self._recent_events = []
-        # 会话级昵称（按群/私聊持久记忆）：unified_msg_origin -> 昵称（best-effort，取自事件 sender_name）
+        # 会话级昵称（按群/私聊持久记忆）：unified_msg_origin -> 昵称（best-effort，取自事件 get_sender_name()）
         self._nickname_file = os.path.join(data_dir, "tts_nicknames.json")
         self._nicknames = self._load_nicknames()
+        # 会话级群名（按群持久记忆）：unified_msg_origin -> 群名（best-effort，来自 OneBot 随消息下发的
+        # group_name，取不到时后台调一次 get_group() 兜底）。私聊会话不存在群名。
+        self._group_name_file = os.path.join(data_dir, "tts_groupnames.json")
+        self._group_names = self._load_group_names()
+        # 正在后台查群名的会话（避免同一群并发重复请求）
+        self._group_name_pending: set = set()
         # 头像缓存（WebUI 会话列表用）：腾讯公开 CDN + 本地缓存，取不到就退化为首字母色块，
         # 任何失败都不影响语音功能（详见 utils/avatar.py）。
         self.avatars = avatar.AvatarCache(os.path.join(data_dir, "avatars"))
@@ -401,6 +407,84 @@ class CosyVoicePlugin(Star):
         os.makedirs(os.path.dirname(self._nickname_file), exist_ok=True)
         with open(self._nickname_file, "w", encoding="utf-8") as f:
             json.dump(self._nicknames, f, ensure_ascii=False, indent=2)
+
+    def _load_group_names(self) -> dict:
+        try:
+            with open(self._group_name_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_group_names(self):
+        os.makedirs(os.path.dirname(self._group_name_file), exist_ok=True)
+        with open(self._group_name_file, "w", encoding="utf-8") as f:
+            json.dump(self._group_names, f, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _is_private_origin(origin: str) -> bool:
+        """UMO 是否是私聊：``平台:GroupMessage:群号`` 之外都算私聊（不依赖 event API，便于复用）。"""
+        parts = str(origin or "").split(":")
+        if len(parts) >= 3 and parts[1].strip().lower().startswith("group"):
+            return False
+        return True
+
+    def _remember_names(self, event: AstrMessageEvent, origin: str) -> None:
+        """记录会话昵称与群名（best-effort，任何失败都不影响语音）。
+
+        - 昵称：**必须**走 ``event.get_sender_name()``。AstrMessageEvent 没有 ``sender_name``
+          属性（旧代码 ``getattr(event, "sender_name", "")`` 永远拿到空串，所以昵称一直没记上）；
+        - 群名：OneBot/NapCat 会把群名随消息下发（框架里就是 ``message_obj.group.group_name``）；
+          没有时后台调一次 ``event.get_group()``（aiocqhttp 下走 OneBot ``get_group_info``）兜底，
+          **后台执行不阻塞回复**，同一群只查一次（查过或正在查就跳过）。
+        """
+        try:
+            nick = str(event.get_sender_name() or "").strip()
+        except Exception:  # noqa: BLE001
+            nick = ""
+        if nick and self._nicknames.get(origin) != nick:
+            self._nicknames[origin] = nick
+            try:
+                self._save_nicknames()
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[cosyvoice] 昵称落盘失败（忽略）: {e}")
+
+        if self._is_private_origin(origin):
+            return  # 私聊没有群名
+        gname = ""
+        try:
+            _g = getattr(getattr(event, "message_obj", None), "group", None)
+            gname = str(getattr(_g, "group_name", "") or "").strip()
+        except Exception:  # noqa: BLE001
+            gname = ""
+        if gname:
+            if self._group_names.get(origin) != gname:
+                self._group_names[origin] = gname
+                try:
+                    self._save_group_names()
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(f"[cosyvoice] 群名落盘失败（忽略）: {e}")
+            return
+        if origin in self._group_names or origin in self._group_name_pending:
+            return
+        self._group_name_pending.add(origin)
+        try:
+            asyncio.create_task(self._fetch_group_name(event, origin))
+        except Exception:  # noqa: BLE001
+            self._group_name_pending.discard(origin)
+
+    async def _fetch_group_name(self, event: AstrMessageEvent, origin: str) -> None:
+        """后台补查群名（消息里没带 group_name 时）；失败不影响任何功能。"""
+        try:
+            group = await event.get_group()
+            name = str(getattr(group, "group_name", "") or "").strip()
+            if name and self._group_names.get(origin) != name:
+                self._group_names[origin] = name
+                self._save_group_names()
+                logger.info(f"[cosyvoice] 已记录群名「{name}」（{origin}）")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[cosyvoice] 后台取群名失败（忽略）: {e}")
+        finally:
+            self._group_name_pending.discard(origin)
 
     def _session_enabled(self, event: AstrMessageEvent) -> bool:
         return event.unified_msg_origin in self._sessions
@@ -873,13 +957,12 @@ class CosyVoicePlugin(Star):
     async def on_decorating_result(self, event: AstrMessageEvent):
         cfg = self._refresh_cfg()
 
-        # 记录会话昵称（best-effort，取自事件 sender_name），供 WebUI 会话列表友好展示；
+        # 记录会话昵称与群名（best-effort），供 WebUI 会话列表友好展示；
         # 放在最前，确保即使被 suppress / 未命中 TTS 也照样记录（用户只想给任意会话配音色）。
+        # 昵称必须走 event.get_sender_name()（事件对象**没有** sender_name 属性，旧写法永远拿空）；
+        # 群名优先取消息下发的 group_name，缺失时后台补查（见 _remember_names，不阻塞回复）。
         origin = event.unified_msg_origin
-        nick = getattr(event, "sender_name", "") or ""
-        if nick and self._nicknames.get(origin) != nick:
-            self._nicknames[origin] = nick
-            self._save_nicknames()
+        self._remember_names(event, origin)
 
         # 本插件的 /tts 指令或 LLM 工具已自行发送语音，避免重复
         if self._get_flag(event, "suppress", False):

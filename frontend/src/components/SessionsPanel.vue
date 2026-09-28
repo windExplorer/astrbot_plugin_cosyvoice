@@ -42,6 +42,10 @@
               <div class="cv-sess-sub">
                 <span v-if="row.is_group">群号 {{ row.group_id }}</span>
                 <span v-else-if="row.user_id">QQ {{ row.user_id }}</span>
+                <!-- 群聊里昵称记的是「最近发过言的人」，作为谁在用的补充信息 -->
+                <span v-if="row.is_group && row.nickname" class="cv-ellipsis">
+                  最近发言 {{ row.nickname }}
+                </span>
                 <!-- 只展示群号 / QQ 号；完整 unified_msg_origin 放在悬浮提示里，需要时再看 -->
                 <el-tooltip :content="row.id" placement="bottom" :show-after="400">
                   <span class="cv-plat">{{ row.platform }}</span>
@@ -136,9 +140,14 @@ const stats = computed(() => {
   return { total, on, prob, off: total - on }
 })
 
+// 群聊优先显示群名（OneBot 随消息下发的 group_name），没有才回退「群 + 群号」；
+// 私聊优先显示对方昵称，没有才回退「QQ + QQ 号」。
 function displayName(row) {
+  if (row.is_group) {
+    if (row.group_name) return row.group_name
+    return row.group_id ? `群 ${row.group_id}` : row.label || row.id
+  }
   if (row.nickname) return row.nickname
-  if (row.is_group) return row.group_id ? `群 ${row.group_id}` : row.label || row.id
   return row.user_id ? `QQ ${row.user_id}` : row.id
 }
 function initialOf(row) {
