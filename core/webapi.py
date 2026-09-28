@@ -353,40 +353,54 @@ def _set_voice_hidden(plugin):
 
 
 def _fmt_origin(origin: str) -> str:
-    """把 unified_msg_origin 解析成易读标签（best-effort）。"""
-    parts = str(origin).split(":")
-    if len(parts) >= 3:
-        return f"{parts[0]} · 群 {parts[1]} · 用户 {parts[2]}"
-    if len(parts) == 2:
-        return f"{parts[0]} · {parts[1]}"
+    """把 unified_msg_origin 转成人能读的标签：群聊只给群号、私聊只给 QQ 号。"""
+    p = _parse_origin(origin)
+    if p["is_group"]:
+        return f"群 {p['group_id']}"
+    if p["user_id"]:
+        return f"QQ {p['user_id']}"
     return str(origin)
 
 
 def _parse_origin(origin: str) -> dict:
     """把 unified_msg_origin 解析成结构化字段（best-effort），供 WebUI 友好展示。
 
-    常见格式：
-      - 群聊：<平台>:<群号>:<QQ号>  ->  group_id / user_id 都有
-      - 私聊：<平台>:<QQ号>        ->  仅 user_id
+    AstrBot 的 UMO 形如 ``<platform_id>:<message_type>:<session_id>``：
+
+      - 群聊：``aiocqhttp:GroupMessage:123456789`` → 会话 ID 是**群号**
+      - 私聊：``aiocqhttp:FriendMessage:10001``    → 会话 ID 是**对方 QQ 号**
+
+    历史坑：旧实现误按「平台:群号:QQ号」解析，于是把 ``GroupMessage`` / ``FriendMessage``
+    当成了群号 —— 结果①所有会话都被判成群聊、②头像 id 取到 ``FriendMessage`` 这种字符串
+    （判数字后为空）→ 头像永远拼不出 URL。此处按消息类型判定群/私聊。
+
+    兼容性：段数少于 3 的旧式/异常 origin（``platform:session_id``）与未识别类型
+    （temp/guild 等）一律按**私聊**处理——不猜群号，避免把 QQ 号显示成群号。
     """
-    parts = str(origin).split(":")
+    raw = str(origin or "")
+    parts = raw.split(":")
     platform = parts[0] if parts else ""
-    if len(parts) >= 3:
-        group_id, user_id = parts[1], parts[2]
-    elif len(parts) == 2:
-        group_id, user_id = "", parts[1]
+    msg_type = parts[1] if len(parts) >= 3 else ""
+    session_id = parts[-1] if len(parts) >= 2 else ""
+    low = msg_type.strip().lower()
+    if low.startswith("group"):
+        is_group, group_id, user_id = True, session_id, ""
     else:
-        group_id = user_id = ""
-    if group_id:
-        label = f"群 {group_id} · 用户 {user_id}"
+        # friend / private / direct / temp / guild / 未知 / 两段式 → 都是「对人」的会话
+        is_group, group_id, user_id = False, "", session_id
+    if is_group:
+        label = f"群 {group_id}"
     elif user_id:
-        label = f"用户 {user_id}"
+        label = f"QQ {user_id}"
     else:
-        label = str(origin)
+        label = raw
     return {
         "platform": platform,
+        "msg_type": msg_type,
+        "session_id": session_id,
         "group_id": group_id,
         "user_id": user_id,
+        "is_group": is_group,
         "label": label,
     }
 
@@ -405,11 +419,13 @@ def _list_sessions(plugin):
             mode = {"both": "语音+文字", "voice_only": "仅语音"}.get(sm, "默认(跟随全局)")
             prob = raw if isinstance(raw, (int, float)) else (1.0 if on else None)
             parsed = _parse_origin(origin)
-            is_group = bool(parsed["group_id"])
+            is_group = bool(parsed["is_group"])
             sessions.append({
                 "id": origin,
-                "user": _fmt_origin(origin),
+                "user": parsed["label"],
                 "platform": parsed["platform"],
+                "msg_type": parsed["msg_type"],
+                "session_id": parsed["session_id"],
                 "group_id": parsed["group_id"],
                 "user_id": parsed["user_id"],
                 "label": parsed["label"],

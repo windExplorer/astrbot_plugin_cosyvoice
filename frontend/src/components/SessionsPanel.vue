@@ -24,7 +24,13 @@
       <div v-loading="loading" class="cv-sess-list">
         <div v-for="row in sessions" :key="row.id" class="cv-sess-row">
           <div class="cv-sess-id">
-            <el-avatar :size="46" :src="avatarOf(row)" shape="circle" class="cv-avatar">
+            <el-avatar
+              :size="46"
+              :src="avatarOf(row)"
+              shape="circle"
+              class="cv-avatar"
+              @error="() => onAvatarError(row)"
+            >
               <span class="cv-avatar-fallback">{{ initialOf(row) }}</span>
             </el-avatar>
             <div class="cv-sess-text">
@@ -35,8 +41,11 @@
               </div>
               <div class="cv-sess-sub">
                 <span v-if="row.is_group">群号 {{ row.group_id }}</span>
-                <span v-if="row.user_id">QQ {{ row.user_id }}</span>
-                <span v-if="row.platform">{{ row.platform }}</span>
+                <span v-else-if="row.user_id">QQ {{ row.user_id }}</span>
+                <!-- 只展示群号 / QQ 号；完整 unified_msg_origin 放在悬浮提示里，需要时再看 -->
+                <el-tooltip :content="row.id" placement="bottom" :show-after="400">
+                  <span class="cv-plat">{{ row.platform }}</span>
+                </el-tooltip>
               </div>
             </div>
           </div>
@@ -117,6 +126,8 @@ const avatarLoading = ref(false)
 const voices = ref([])
 // 头像缓存：'group:123' / 'user:456' -> data URI（抓不到就不出现在这里，前端退化为首字母）
 const avatarMap = ref({})
+// 加载失败过的头像（后端 + CDN 都没成）→ 该行直接用首字母色块
+const avatarFailed = ref(new Set())
 
 const stats = computed(() => {
   const total = sessions.value.length
@@ -134,9 +145,28 @@ function initialOf(row) {
   const n = String(displayName(row)).trim()
   return n ? [...n][0] : '?'
 }
+// 兜底：后端没取到（服务器无外网 / CDN 暂时不通）时，浏览器直接试腾讯 CDN——
+// 面板内嵌 iframe 有时能直连外网，能显示就显示；失败则由 @error 退回首字母色块。
+function cdnUrl(row) {
+  const id = String(row.avatar_id || '')
+  if (!/^\d+$/.test(id)) return ''
+  return row.avatar_kind === 'group'
+    ? `https://p.qlogo.cn/gh/${id}/${id}/100`
+    : `https://q1.qlogo.cn/g?b=qq&nk=${id}&s=100`
+}
 function avatarOf(row) {
   if (!row.avatar_id) return ''
-  return avatarMap.value[`${row.avatar_kind}:${row.avatar_id}`] || ''
+  const key = `${row.avatar_kind}:${row.avatar_id}`
+  if (avatarFailed.value.has(key)) return ''
+  return avatarMap.value[key] || cdnUrl(row)
+}
+// 图片加载失败（含 CDN 直连被拦）→ 记为失败，此后该行只用首字母色块，不再反复请求
+function onAvatarError(row) {
+  const key = `${row.avatar_kind}:${row.avatar_id}`
+  if (!key || avatarFailed.value.has(key)) return
+  const next = new Set(avatarFailed.value)
+  next.add(key)
+  avatarFailed.value = next
 }
 function rowSendMode(row) {
   if (row.mode === '语音+文字') return 'both'
@@ -330,6 +360,9 @@ defineExpose({ load })
   font-size: 12px; color: var(--cv-text-2); margin-top: 3px;
   display: flex; gap: 10px; flex-wrap: wrap;
 }
+/* 平台名：次要信息，悬浮才显示完整 UMO（不占明面） */
+.cv-plat { opacity: .75; cursor: help; border-bottom: 1px dashed transparent; }
+.cv-plat:hover { opacity: 1; border-bottom-color: var(--cv-border); }
 
 .cv-sess-ctl { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .cv-ctl { display: flex; align-items: center; gap: 6px; }
