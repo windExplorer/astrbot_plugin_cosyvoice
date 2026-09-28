@@ -41,8 +41,14 @@ except Exception:  # pragma: no cover
 # 只允许数字 id 参与文件名拼接（防目录穿越）
 _SAFE_ID = re.compile(r"[^0-9]")
 
-FRIEND_URL = "https://q1.qlogo.cn/g?b=qq&nk={id}&s=100"
-GROUP_URL = "https://p.qlogo.cn/gh/{id}/{id}/100"
+# 用户头像：与 astrbot_plugin_box / astrbot_plugin_moe_star_whisper 同款官方接口
+# （``headimg_dl`` 支持指定尺寸；spec 合法值只有 40 / 100 / 140 / 640，其它会返回 400）。
+# 控制台列表头像按 46px 显示，取 140 已足够清晰、体积仅 ~6KB（640 会到 ~77KB）。
+FRIEND_URL = "https://q4.qlogo.cn/headimg_dl?dst_uin={id}&spec=140"
+# 群头像：OneBot 的 get_group_info 不返回群头像，只能按群号拼（与 user_gateway 一致）
+GROUP_URL = "https://p.qlogo.cn/gh/{id}/{id}/140"
+# 备用接口（q4 不通时回退，同为腾讯官方、内容一致）
+FRIEND_URL_FALLBACK = "https://q1.qlogo.cn/g?b=qq&nk={id}&s=100"
 
 MAX_BYTES = 512 * 1024  # 头像不该超过 512KB，超过视为异常响应
 
@@ -218,30 +224,42 @@ class AvatarCache:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _candidate_urls(self, kind: str, target_id: str) -> list[str]:
+        """该头像的候选地址（按顺序尝试）：主接口 -> 备用接口。"""
+        tid = safe_id(target_id)
+        if not tid:
+            return []
+        urls = [avatar_url(kind, tid)]
+        if kind != "group" and FRIEND_URL_FALLBACK:
+            urls.append(FRIEND_URL_FALLBACK.format(id=tid))
+        return [u for u in urls if u]
+
     async def fetch_one(self, kind: str, target_id: str) -> Optional[bytes]:
-        """从腾讯 CDN 抓一个头像（不落盘）。失败返回 None。"""
-        url = avatar_url(kind, target_id)
-        if not url:
+        """从腾讯 CDN 抓一个头像（不落盘）；主接口失败会依次试备用接口。失败返回 None。"""
+        urls = self._candidate_urls(kind, target_id)
+        if not urls:
             return None
         session = await self._get_session()
         if session is None:
             return None
         if self._sem is None:
             self._sem = asyncio.Semaphore(self.concurrency)
-        try:
-            async with self._sem:
-                async with session.get(url) as resp:
-                    if resp.status != 200:
-                        return None
-                    data = await resp.content.read(MAX_BYTES + 1)
-        except Exception as e:  # noqa: BLE001  网络问题一律静默（列表不能因为头像挂掉）
-            logger.debug(f"[cosyvoice] 抓取头像失败 {kind}:{target_id}: {e}")
-            return None
-        if not data or len(data) > MAX_BYTES:
-            return None
-        if guess_mime(data) == "application/octet-stream":
-            return None  # 不是图片（多半是错误页）
-        return data
+        for url in urls:
+            try:
+                async with self._sem:
+                    async with session.get(url) as resp:
+                        if resp.status != 200:
+                            continue
+                        data = await resp.content.read(MAX_BYTES + 1)
+            except Exception as e:  # noqa: BLE001  网络问题一律静默（列表不能因为头像挂掉）
+                logger.debug(f"[cosyvoice] 抓取头像失败 {kind}:{target_id} {url}: {e}")
+                continue
+            if not data or len(data) > MAX_BYTES:
+                continue
+            if guess_mime(data) == "application/octet-stream":
+                continue  # 不是图片（多半是错误页）
+            return data
+        return None
 
     async def ensure(
         self,

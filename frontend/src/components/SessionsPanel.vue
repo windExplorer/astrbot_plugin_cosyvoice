@@ -147,12 +147,13 @@ function initialOf(row) {
 }
 // 兜底：后端没取到（服务器无外网 / CDN 暂时不通）时，浏览器直接试腾讯 CDN——
 // 面板内嵌 iframe 有时能直连外网，能显示就显示；失败则由 @error 退回首字母色块。
+// 接口与后端保持一致：用户头像 headimg_dl（box / 星语 同款官方接口），群头像按群号拼。
 function cdnUrl(row) {
   const id = String(row.avatar_id || '')
   if (!/^\d+$/.test(id)) return ''
   return row.avatar_kind === 'group'
-    ? `https://p.qlogo.cn/gh/${id}/${id}/100`
-    : `https://q1.qlogo.cn/g?b=qq&nk=${id}&s=100`
+    ? `https://p.qlogo.cn/gh/${id}/${id}/140`
+    : `https://q4.qlogo.cn/headimg_dl?dst_uin=${id}&spec=140`
 }
 function avatarOf(row) {
   if (!row.avatar_id) return ''

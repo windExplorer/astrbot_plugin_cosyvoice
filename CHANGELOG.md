@@ -2,6 +2,20 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.2.2 (2026-09-28)
+
+- fix: 头像接口对齐同生态项目（`astrbot_plugin_box` / `astrbot_plugin_moe_star_whisper` 同款）。
+  - **用户头像**改用官方 `headimg_dl`：`https://q4.qlogo.cn/headimg_dl?dst_uin=<QQ>&spec=140`
+    （box / 星语 用的就是这个接口；此前用的是 user_gateway 的 `q1…&s=100`）。尺寸取 **140**：
+    该接口只认 40 / 100 / 140 / 640（实测传 200 直接 400），列表头像按 46px 显示，140 足够清晰
+    且单张仅 ~6KB——640 会到 ~77KB，几十个会话的 data URI 会把列表撑得很重。
+  - **主接口失败自动回退**：用户头像 q4 不通时接着试 q1 的 `g?b=qq&nk=…&s=100`（同为腾讯官方、
+    内容一致）；群头像维持按群号拼 `p.qlogo.cn/gh/<群号>/<群号>/140` —— 这一步无法省：
+    OneBot 的 `get_group_info` 只回群名与人数、**不含群头像**，框架的 `Group.group_avatar`
+    在 aiocqhttp 下始终为空（只有 KOOK / Discord / Telegram 等平台由适配器填充）。
+  - 前端 CDN 兜底同步换成同一套接口；非法 id（非纯数字，例如旧 bug 传进来的消息类型）不再发出请求。
+- 版本 v2.2.1 -> v2.2.2。
+
 ## v2.2.1 (2026-09-28)
 
 - fix: **会话页群聊/私聊判反 + 头像拿不到（同一个根因）**。
