@@ -29,6 +29,13 @@
           <div class="cv-stat-label">自动 TTS</div>
         </div>
       </div>
+      <div class="cv-stat">
+        <div class="cv-stat-ico alt4"><el-icon><User /></el-icon></div>
+        <div>
+          <div class="cv-stat-val">{{ ov.session_count ?? '—' }}</div>
+          <div class="cv-stat-label">已配置会话</div>
+        </div>
+      </div>
     </div>
 
     <div class="cv-grid cv-grid-2">
@@ -78,7 +85,7 @@
 import { ref, inject, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
-  Connection, Headset, Cpu, ChatDotRound, InfoFilled, MagicStick, Clock,
+  Connection, Headset, Cpu, ChatDotRound, InfoFilled, MagicStick, Clock, User,
 } from '@element-plus/icons-vue'
 
 const bridge = inject('bridge')
@@ -125,6 +132,7 @@ defineExpose({ load })
 .cv-stat-ico.alt { background: var(--cv-primary-soft); color: var(--cv-primary); }
 .cv-stat-ico.alt2 { background: rgba(99,102,241,.12); color: #6366f1; }
 .cv-stat-ico.alt3 { background: rgba(245,158,11,.12); color: var(--cv-warn); }
+.cv-stat-ico.alt4 { background: rgba(14,165,233,.12); color: #0ea5e9; }
 .cv-stat-val { font-size: 17px; font-weight: 700; }
 .cv-stat-label { font-size: 12px; color: var(--cv-text-2); }
 .cv-grid-2 { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }

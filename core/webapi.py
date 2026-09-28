@@ -54,6 +54,8 @@ def register_web_apis(plugin) -> None:
     ctx.register_web_api(f"/{p}/sessions/delete", _delete_session(plugin), ["POST"], "删除会话语音状态")
     ctx.register_web_api(f"/{p}/sessions/clear", _clear_sessions(plugin), ["POST"], "清空全部会话语音状态")
     ctx.register_web_api(f"/{p}/sessions/batch_off", _batch_off(plugin), ["POST"], "批量关闭会话语音")
+    ctx.register_web_api(f"/{p}/avatars", _list_avatars(plugin), ["GET"], "批量取会话头像（data URI）")
+    ctx.register_web_api(f"/{p}/avatars/refresh", _refresh_avatars(plugin), ["POST"], "更新头像缓存")
     ctx.register_web_api(f"/{p}/synthesize", _synthesize(plugin), ["GET", "POST"], "合成试听（返回 wav 下载）")
     ctx.register_web_api(f"/{p}/translate", _translate_config(plugin), ["GET", "POST"], "翻译配置（读取/保存）")
     ctx.register_web_api(f"/{p}/translate/test", _translate_test(plugin), ["POST"], "翻译配置测试")
@@ -403,6 +405,7 @@ def _list_sessions(plugin):
             mode = {"both": "语音+文字", "voice_only": "仅语音"}.get(sm, "默认(跟随全局)")
             prob = raw if isinstance(raw, (int, float)) else (1.0 if on else None)
             parsed = _parse_origin(origin)
+            is_group = bool(parsed["group_id"])
             sessions.append({
                 "id": origin,
                 "user": _fmt_origin(origin),
@@ -415,6 +418,13 @@ def _list_sessions(plugin):
                 "mode": mode,
                 "voice": plugin._voices.get(origin, "") or "默认",
                 "prob": prob,
+                # 头像要按「群 / 用户」分别取（群头像用群号、私聊头像用 QQ 号）：
+                # 群聊取群头像更有辨识度，私聊取对方头像；配合 /avatars 端点给前端 data URI。
+                "avatar_kind": "group" if is_group else "user",
+                "avatar_id": parsed["group_id"] if is_group else parsed["user_id"],
+                "is_group": is_group,
+                # 展示用：概率百分比（None=未开启），前端直接就绪不必再算
+                "prob_percent": None if prob is None else int(round(float(prob) * 100)),
             })
         return json_response({"sessions": sessions})
 
@@ -429,8 +439,24 @@ def _set_session(plugin):
         if not origin:
             return error_response("缺少 origin", status_code=400)
 
+        # 语音开关 / 概率：二者同源（都写 plugin._sessions[origin]），语义与聊天指令
+        # /tts_on 一致 —— True=常开（每句都念）、0<p<1=按概率念、不存在=关闭。
+        # prob 优先于 on（前端概率滑杆走 prob，老的开关调用仍可只传 on）。
         on = payload.get("on")
-        if on is not None:
+        prob = payload.get("prob")
+        if prob is not None:
+            try:
+                p = float(prob)
+            except (TypeError, ValueError):
+                return error_response("prob 必须是 0~1 之间的数字", status_code=400)
+            if p <= 0:
+                plugin._sessions.pop(origin, None)  # 0% 等同关闭
+            elif p >= 1.0:
+                plugin._sessions[origin] = True  # 常开
+            else:
+                plugin._sessions[origin] = round(p, 4)
+            plugin._save_sessions()
+        elif on is not None:
             if bool(on):
                 plugin._sessions[origin] = True
             else:
@@ -535,6 +561,71 @@ def _cleanup_previews(dirpath: str, keep: int = _PREVIEW_KEEP) -> None:
                 pass
     except Exception as e:  # noqa: BLE001
         logger.debug(f"[cosyvoice] 清理试听预览失败: {e}")
+
+
+# ---------- 头像（会话列表用） ----------
+def _list_avatars(plugin):
+    """批量取头像，返回 ``{id: data URI}``（前端直接塞 ``<img src>``）。
+
+    参数：``?type=user|group&ids=1,2,3&force=0&days=30``。群头像按群号取、私聊头像按
+    QQ 号取；抓不到的 id 不会出现在结果里（前端自然退化为首字母色块）。
+    """
+    async def handler():
+        cache = getattr(plugin, "avatars", None)
+        if cache is None:
+            return json_response({"items": {}, "error": "头像缓存未初始化"})
+        kind = str(request.query.get("type") or "user").strip().lower()
+        if kind not in ("user", "group"):
+            return error_response("type 只能是 user / group", status_code=400)
+        raw = str(request.query.get("ids") or "")
+        ids = [s.strip() for s in raw.split(",") if s.strip()][:200]
+        force = str(request.query.get("force") or "").strip().lower() in ("1", "true", "yes", "on")
+        if not ids:
+            return json_response({"items": {}, "requested": 0, "got": 0, "stats": cache.stats()})
+        try:
+            days = int(request.query.get("days") or 0)
+        except (TypeError, ValueError):
+            days = 0
+        try:
+            items = await cache.ensure_map(
+                kind, ids, force=force, max_age_days=(days if days > 0 else None)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[cosyvoice] 取头像失败（忽略）: {e}")
+            items = {}
+        return json_response({
+            "items": items,
+            "requested": len(ids),
+            "got": len(items),
+            "stats": cache.stats(),
+        })
+
+    return handler
+
+
+def _refresh_avatars(plugin):
+    """更新头像缓存：body ``{type?, ids?}``；``ids`` 为空表示把该类型已缓存的全部重取。"""
+    async def handler():
+        cache = getattr(plugin, "avatars", None)
+        if cache is None:
+            return error_response("头像缓存未初始化", status_code=500)
+        payload = await request.json(default={})
+        kind = str(payload.get("type") or "user").strip().lower()
+        if kind not in ("user", "group"):
+            return error_response("type 只能是 user / group", status_code=400)
+        ids = payload.get("ids")
+        if not isinstance(ids, list) or not ids:
+            ids = cache.cached_ids(kind)
+        if not ids:
+            return json_response({"refreshed": 0, "failed": 0, "stats": cache.stats()})
+        got = await cache.ensure(kind, ids, force=True)
+        return json_response({
+            "refreshed": len(got),
+            "failed": max(0, len(ids) - len(got)),
+            "stats": cache.stats(),
+        })
+
+    return handler
 
 
 # ---------- 合成试听 ----------

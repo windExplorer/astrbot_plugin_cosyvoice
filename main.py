@@ -42,7 +42,7 @@ from .core.webapi import register_web_apis
 from .core.translator import Translator
 from .cosyvoice.client import CosyVoiceClient, CosyVoiceServerError, QueueFullError
 from .cosyvoice.router import CosyVoiceRouter
-from .utils import audio, audio_delivery
+from .utils import audio, audio_delivery, avatar
 
 PLUGIN_ID = "astrbot_plugin_cosyvoice"
 
@@ -213,6 +213,9 @@ class CosyVoicePlugin(Star):
         # 会话级昵称（按群/私聊持久记忆）：unified_msg_origin -> 昵称（best-effort，取自事件 sender_name）
         self._nickname_file = os.path.join(data_dir, "tts_nicknames.json")
         self._nicknames = self._load_nicknames()
+        # 头像缓存（WebUI 会话列表用）：腾讯公开 CDN + 本地缓存，取不到就退化为首字母色块，
+        # 任何失败都不影响语音功能（详见 utils/avatar.py）。
+        self.avatars = avatar.AvatarCache(os.path.join(data_dir, "avatars"))
 
     def _data_dir(self) -> str:
         """持久数据目录。
@@ -2077,4 +2080,8 @@ class CosyVoicePlugin(Star):
 
     async def terminate(self):
         self._flags.clear()
+        try:
+            await self.avatars.close()
+        except Exception:  # noqa: BLE001
+            pass
         await self.client.close()

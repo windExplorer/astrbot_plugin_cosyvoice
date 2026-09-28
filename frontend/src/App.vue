@@ -117,9 +117,14 @@ body {
 
 .cv-app {
   min-height: 100%;
-  padding: 18px 22px 32px;
-  max-width: 1180px;
+  padding: 18px 24px 40px;
+  max-width: 1280px;
   margin: 0 auto;
+}
+@media (max-width: 720px) {
+  .cv-app { padding: 12px 12px 28px; }
+  .cv-sub { display: none; }
+  .cv-tabs .el-tabs__item { padding: 0 12px; font-size: 13px; }
 }
 
 .cv-header {
@@ -195,5 +200,25 @@ body {
   margin-bottom: 14px;
 }
 .cv-grid { display: grid; gap: 14px; }
+.cv-grid-3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
 .cv-spacer { flex: 1; }
+
+/* 通用小组件：统计小标签 / 单行省略 / 提示行 */
+.cv-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; color: var(--cv-text-2);
+  background: var(--cv-panel-2);
+  border: 1px solid var(--cv-border);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+.cv-chip b { color: var(--cv-text); font-weight: 700; }
+.cv-chip.ok b { color: var(--cv-success); }
+.cv-chip.warn b { color: var(--cv-warn); }
+.cv-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cv-hint { font-size: 12px; color: var(--cv-text-2); line-height: 1.6; }
+
+/* Tabs 支持窄屏横向滚动（仪表盘内嵌 iframe 宽度有限） */
+.cv-tabs .el-tabs__nav-wrap { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.cv-tabs .el-tabs__nav-wrap::-webkit-scrollbar { display: none; }
 </style>
