@@ -927,6 +927,35 @@ class CosyVoicePlugin(Star):
         """
         return text
 
+    # 相邻重复块折叠（v2.3.1）：上游把「工具调用那一轮的正文」与「收尾轮正文」合并进
+    # 同一条回复（AstrBot provider_settings.buffer_intermediate_messages，即 WebUI 的
+    # 「合并 Agent 中间消息」），而模型收尾时又复述了一遍开场白。实测（2026-10-10 两次）：
+    #   '好嘞~ 这就给X画一张专属画像！' + '好嘞~ 这就给X画一张专属画像！好啦~ 给你画好啦…'
+    # 拼成一条后同一句**紧邻**出现两次 → 聊天里/语音里同一句念两遍（58 字实测）。
+    # 这里把「紧邻且完全相同」的长块折叠为一份，只处理整块重复，不做全局去重。
+    _REPEAT_BLOCK_RE = re.compile(r"(.{8,}?)\1", re.DOTALL)
+
+    @classmethod
+    def _collapse_adjacent_repeats(cls, text: str) -> str:
+        """折叠文本中紧邻的重复长块（阈值 8 字）：``AXAX…`` → ``AX…``。
+
+        - 只认「紧邻 + 完全相同」的整块重复，不做全局去重——「哈哈」「好的好的」
+          这类短句重复长度不足阈值，不受影响；
+        - 循环折叠直到稳定，覆盖连读三次（``A A A``）的情形；
+        - 任何异常都放行原文，绝不吞内容。
+        """
+        if not text:
+            return text
+        try:
+            prev = None
+            cur = text
+            while prev != cur:
+                prev = cur
+                cur = cls._REPEAT_BLOCK_RE.sub(r"\1", cur)
+            return cur
+        except Exception:  # noqa: BLE001
+            return text
+
     def _extract_brackets(self, text: str) -> str:
         """提取所有【普通】括号内容，按出现顺序拼接成可单独发送的文字（换行分隔）。
 
@@ -991,7 +1020,13 @@ class CosyVoicePlugin(Star):
             for c in chain
             if isinstance(c, Comp.Plain) and getattr(c, "text", "")
         ]
-        full_text = "".join(texts).strip()
+        _raw_full_text = "".join(texts).strip()
+        full_text = self._collapse_adjacent_repeats(_raw_full_text)
+        if full_text != _raw_full_text:
+            logger.info(
+                "[cosyvoice] 结果链文本存在紧邻重复（上游合并了中间轮 / 模型复述了开场白），"
+                f"已折叠后合成：{len(_raw_full_text)}字 → {len(full_text)}字"
+            )
         if not is_speakable(full_text):
             # 结果链文本无效（空 / [] 占位符等）：回退用本轮模型原文合成（同样净化）
             fb = clean_tts_text(self._get_last_llm(event.unified_msg_origin))
