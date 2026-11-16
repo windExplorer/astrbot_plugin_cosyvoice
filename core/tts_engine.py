@@ -60,6 +60,10 @@ _TAG_TAIL_RE = re.compile(r"\[([A-Za-z_]*)$")
 # 「整段只有副语言标记」形态（允许前后空白）：如 `[breath]`、`[quick_breath][breath]`。
 _MARKUP_ONLY_RE = re.compile(r"^(?:\s*\[[A-Za-z_]+\])+\s*$")
 
+# 「可读字符」判定（字母/数字/汉字/假名/谚文）——is_speakable 与 _absorb_pause_only
+# 共用同一口径：不含任何可读字符的段（纯省略号/标点/符号/空白）没有任何朗读价值。
+_READABLE_RE = re.compile(r"[\w\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+
 
 def _has_open_markup_tail(s: str) -> bool:
     """段尾是否为「某个白名单副语言标记被截断的前缀」。
@@ -169,7 +173,7 @@ def is_speakable(text: str) -> bool:
         return False
     # 无任何可读字符（字母/数字/汉字/假名/谚文）→ 纯标点、纯符号、纯 emoji → 不合成，
     # 否则服务端只会念出一段静音（用户看到的「空消息也送去转语音」即此类）。
-    if not re.search(r"[\w\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", t):
+    if not _READABLE_RE.search(t):
         return False
     return True
 
@@ -447,10 +451,13 @@ class TtsEngine:
 
         副语言标记由 synthesize / iter_segment_* 在分段【之后】逐段注入（_inject），
         绝不参与分段字数计算（否则 48 字正文带标记后变 98 字，会被窗口误切成多段）。
-        本入口末尾的两道保护（_merge_broken_markup / _absorb_lone_markup）只为兜住
-        「输入文本里本就带着标记」的边缘情况（如模型自己输出了 [breath]）。
+        本入口末尾的三道保护（_merge_broken_markup / _absorb_lone_markup /
+        _absorb_pause_only）只为兜住「输入文本里本就带着标记/停顿符号」的边缘情况
+        （如模型自己输出了 [breath]、省略号独占一行）。
         """
-        return self._absorb_lone_markup(self._merge_broken_markup(self._split_text_raw(text)))
+        return self._absorb_pause_only(
+            self._absorb_lone_markup(self._merge_broken_markup(self._split_text_raw(text)))
+        )
 
     def _split_text_raw(self, text: str) -> list:
         text = (text or "").strip()
@@ -501,7 +508,11 @@ class TtsEngine:
         text_chunks: list = []
         for row in rows:
             text_chunks.extend(self._split_window(row))
-        text_chunks = self._absorb_lone_markup(self._merge_broken_markup(text_chunks))
+        # 文字侧与语音侧做同一套后处理（v2.5.1：补上 _absorb_pause_only——此前文字侧
+        # rows 不做短段合并，省略号独占一行时会作为一条独立文字消息发出）
+        text_chunks = self._absorb_pause_only(
+            self._absorb_lone_markup(self._merge_broken_markup(text_chunks))
+        )
         # 没有发生短块合并（两套分段结果相同）→ 退化为一一对应
         if not text_chunks or text_chunks == voice_chunks:
             return one_to_one
@@ -712,6 +723,46 @@ class TtsEngine:
                     out[-1] = out[-1] + c
                 continue
             out.append(c)
+        return out
+
+    @staticmethod
+    def _absorb_pause_only(chunks: list) -> list:
+        """把「纯停顿段」并入相邻段：只有省略号/标点/符号、没有任何可读字符的段。
+
+        根因（用户看到的「句首省略号单独成段还被拿去生成语音」）：分段是标点/窗口驱动的，
+        窗口边界或换行边界落在省略号前后时，``……`` / ``......`` / ``。。。`` 会单独成段——
+        它没有任何可朗读内容，语音侧单独合成只会产出静音（且逐段路径会打出一条
+        「无有效可合成文本」的失败记录），文字侧还会作为一条独立消息发出。
+
+        处理：并入**前一段**（句尾挂停顿，听感自然）；处于开头没有前段可并时并入
+        **后一段**（句首停顿跟随其后正文）。强制合并、不受 _merge_short 的 cap 限制
+        （纯停顿段是零内容段，比「不超窗口」优先级更高）。
+
+        语音（split_text）与文字（split_text_pairs）两侧统一应用；只移动边界、
+        不删任何字符，「去空白总长」不变，跨套分段配对（_pair_voice_text）不受影响。
+        """
+        out: list = []
+        pending: list = []  # 开头还没有可并对象的纯停顿段：暂存，等第一段正文拼到它前面
+        for c in chunks:
+            c = (c or "").strip()
+            if not c:
+                continue
+            if not _READABLE_RE.search(c):
+                if out:
+                    out[-1] = out[-1] + c
+                else:
+                    pending.append(c)
+                continue
+            if pending:
+                c = "".join(pending) + c
+                pending = []
+            out.append(c)
+        if pending:
+            if out:
+                out[-1] = out[-1] + "".join(pending)
+            else:
+                # 整条输入只有停顿：原样保留一段，交由调用方 is_speakable 过滤
+                out = pending
         return out
 
     @staticmethod
