@@ -121,22 +121,28 @@ body {
 }
 
 .cv-app {
-  min-height: 100%;
-  padding: 18px 24px 40px;
+  /* v2.5.2 app-shell 布局：页高 = iframe 视口，导航栏/页签固定，
+     只有内容区滚动——旧布局整页文档滚动，页面一长导航栏就被滚走 */
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 24px 0;
   max-width: 1280px;
   margin: 0 auto;
+  box-sizing: border-box;
 }
 @media (max-width: 720px) {
-  .cv-app { padding: 12px 12px 28px; }
+  .cv-app { padding: 10px 12px 0; }
   .cv-sub { display: none; }
   .cv-tabs .el-tabs__item { padding: 0 12px; font-size: 13px; }
 }
 
 .cv-header {
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 16px;
+  margin-bottom: 14px;
 }
 .cv-brand { display: flex; align-items: center; gap: 12px; }
 .cv-logo {
@@ -150,9 +156,10 @@ body {
 .cv-sub { font-size: 12px; color: var(--cv-text-2); margin-top: 2px; }
 .cv-header-actions { display: flex; align-items: center; gap: 10px; }
 
-/* Tabs 美化：胶囊化头部 */
+/* Tabs 美化：胶囊化头部（flex:none 固定在内容区上方） */
+.cv-tabs { flex: none; }
 .cv-tabs .el-tabs__header {
-  margin: 0 0 16px;
+  margin: 0 0 14px;
   border: none;
   background: var(--cv-panel);
   border-radius: var(--cv-radius);
@@ -181,7 +188,20 @@ body {
 }
 .cv-tabs .el-tabs__active-bar { display: none; }
 
-.cv-content { animation: cv-fade .25s ease; }
+.cv-content {
+  /* 唯一的滚动容器：min-height:0 允许 flex 子项收缩触发内滚；
+     内滚容器让 sticky（配置页保存栏 / 音色页批量条）继续生效 */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 20px;
+  animation: cv-fade .25s ease;
+  scrollbar-width: thin;
+  scrollbar-color: var(--cv-border) transparent;
+}
+.cv-content::-webkit-scrollbar { width: 8px; }
+.cv-content::-webkit-scrollbar-thumb { background: var(--cv-border); border-radius: 4px; }
+.cv-content::-webkit-scrollbar-track { background: transparent; }
 @keyframes cv-fade {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: none; }

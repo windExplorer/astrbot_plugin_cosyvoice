@@ -407,8 +407,8 @@ defineExpose({ load })
 .cv-page { display: flex; flex-direction: column; gap: 14px; }
 .cv-audition-head { display: flex; align-items: center; gap: 8px; }
 .cv-audition-ico { color: var(--cv-primary); font-size: 18px; }
-.cv-audition-bar { display: flex; align-items: center; gap: 14px; }
-.cv-audio { height: 38px; flex: 1; max-width: 420px; }
+.cv-audition-bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.cv-audio { height: 38px; flex: 1; min-width: 200px; max-width: 420px; }
 
 .cv-batchbar {
   position: sticky; bottom: 12px; z-index: 5;
@@ -427,7 +427,8 @@ defineExpose({ load })
 
 .cv-voice-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  /* 320px：保证操作行 4 个按钮（试听/设为默认/编辑/删除）单行放得下，不再挤成两行 */
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: 12px;
 }
 .cv-voice-card {
@@ -452,5 +453,5 @@ defineExpose({ load })
   font-size: 12px; line-height: 1.5;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-.cv-voice-actions { display: flex; gap: 8px; margin-top: auto; }
+.cv-voice-actions { display: flex; gap: 8px; margin-top: auto; flex-wrap: wrap; }
 </style>
