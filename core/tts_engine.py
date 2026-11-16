@@ -390,18 +390,33 @@ class TtsEngine:
         防止极长无标点文本把整段一次性甩给服务端。0 表示不限制。
         仅在 segment_len > 0（新分段逻辑）时作为兜底生效；旧逻辑由 _legacy_window 处理。
         """
-        return int(self.config.get("max_text_len", 0) or 0)
+        try:
+            # 缺键兜底 200（与 _conf_schema.json 一致；v2.4.0 前缺键=0=无上限）；
+            # 显式 0/None 仍表示不限制
+            return int(self.config.get("max_text_len", 200) or 0)
+        except (TypeError, ValueError):
+            return 200
 
     def _legacy_window(self) -> int:
         """旧分段逻辑窗口：仅在 segment_len 关闭（max<=0）时生效，沿用 max_text_len。"""
-        return int(self.config.get("max_text_len", 0) or 0)
+        try:
+            # 缺键兜底 200（与 _conf_schema.json 一致；v2.4.0 前缺键=0=无上限）；
+            # 显式 0/None 仍表示不限制
+            return int(self.config.get("max_text_len", 200) or 0)
+        except (TypeError, ValueError):
+            return 200
 
     def _seg_first_window(self) -> tuple:
-        """首段字数区间 (min, max)：segment_first_len 配置了用它的，否则回退到普通 segment_len。"""
-        raw = self.config.get("segment_first_len", 0) or 0
-        if not str(raw).strip() or str(raw).strip() == "0":
+        """首段字数区间 (min, max)：segment_first_len 配置了有效上界时用它，
+        否则（留空 / "0" / "0,0" 等解析不出上界的取值）回退到普通 segment_len。
+
+        必须保证上界 > 0：上界为 0 时 _split_window 的窗口 end=start、无标点可寻、
+        truncate 的 cut=start，while start < n 永不推进 → 事件循环死循环（v2.4.0 修）。
+        """
+        fw = self._parse_len_range(self.config.get("segment_first_len", 0), 0)
+        if fw[1] <= 0:
             return self._seg_window()
-        return self._parse_len_range(raw, 0)
+        return fw
 
     def _seg_nopunct_mode(self, which: str) -> str:
         """无标点时的处理模式：
@@ -419,7 +434,9 @@ class TtsEngine:
         """把配置的 seg 分段符号拼成一个正则字符类（自动转义）。空则退回常见标点。"""
         raw = (self.config.get("segment_punct", "") or "").strip()
         if not raw:
-            raw = "，。！？；：、,.!?;:"
+            # 与 _conf_schema.json 默认值及 hint 口径一致（v2.4.0 前是更大的符号集，
+            # 「留空」与「填默认值」行为不一致）
+            raw = "。！？.!?"
         # 转义每个字符，避免用户输入的正则元字符（如 . * +）产生意外匹配
         esc = "".join(re.escape(ch) for ch in raw)
         return f"[{esc}]"
@@ -583,7 +600,12 @@ class TtsEngine:
             start = 0
             is_first = True
             while start < n:
-                fw_lo, fw_hi = (self._seg_first_window() if is_first else (lo, hi))
+                # 首段可用独立的 segment_first_len 上界；其 min 不参与本循环
+                # （短段合并统一由末尾 _merge_short 按 segment_len 的 min 处理）。
+                # 上界异常解析成 0 时兜底回普通窗口，保证 start 必然推进、绝不死循环。
+                fw_hi = self._seg_first_window()[1] if is_first else hi
+                if fw_hi <= 0:
+                    fw_hi = hi
                 end = min(start + fw_hi, n)
                 # 在 [start, end) 窗口内找【最后一个】命中的分段符号：
                 # 取窗口内字数范围内最后一个标点，以它前面（含符号）为一段。
@@ -598,11 +620,14 @@ class TtsEngine:
                     start = cut
                 else:
                     mode = self._seg_nopunct_mode("first" if is_first else "body")
-                    # seek 模式受 hard_cap 约束：剩余长度或 seek 目标超出硬上限时放弃 seek，
-                    # 退回 truncate 硬切——否则无标点长文（错误信息/英文等）会 seek 出
-                    # 远超配置窗口的超长段
-                    if mode == "seek" and not (hard_cap > 0 and n - start > hard_cap):
-                        # 窗口内无标点：往后（超出窗口）找第一个命中的分段符号
+                    if mode == "seek":
+                        # seek：窗口内无标点，往后（超出窗口）找第一个命中的分段符号，
+                        # 在该符号处切。seek 距离仍受 hard_cap 约束：目标超出硬上限说明
+                        # 往后很远都无标点，退回 truncate 硬切，避免 seek 出远超配置窗口
+                        # 的超长段。
+                        # （v2.4.0 修：旧实现外层多了一个「剩余长度超硬上限就整体放弃
+                        # seek」的条件，导致文本只要比 hard_cap 长一次，seek 就必然退化
+                        # 成 truncate——哪怕标点就在窗口后几个字，seek 形同虚设。）
                         nxt = punct_re.search(text, end)
                         if nxt is not None and not (hard_cap > 0 and nxt.end() - start > hard_cap):
                             cut = nxt.end()
@@ -610,12 +635,19 @@ class TtsEngine:
                             if seg:
                                 chunks.append(seg)
                             start = cut
-                        else:
-                            # 到结尾都无标点：剩余整段作为一段
+                        elif nxt is None and (hard_cap <= 0 or n - start <= hard_cap):
+                            # 到结尾都无标点且剩余不超硬上限：剩余整段作为一段
                             seg = text[start:n].strip()
                             if seg:
                                 chunks.append(seg)
                             start = n
+                        else:
+                            # 无标点但剩余超硬上限，或 seek 目标超硬上限：truncate 硬切
+                            cut = min(end, start + hard_cap) if hard_cap > 0 else end
+                            seg = text[start:cut].strip()
+                            if seg:
+                                chunks.append(seg)
+                            start = cut
                     else:
                         # truncate：窗口内无标点，直接在窗口末（受 hard_cap 兜底）硬切
                         cut = min(end, start + hard_cap) if hard_cap > 0 else end
@@ -720,9 +752,12 @@ class TtsEngine:
         cap = self._legacy_window()
         if cap <= 0:
             return [text]
+        # 分段符号沿用 segment_punct 配置（v2.4.0 前写死 。！？!?，配置的符号在旧逻辑下
+        # 不生效）；换行始终是边界，单独保留
+        punct = self._seg_punct_class()
         chunks: list = []
         buf = ""
-        for seg in re.split(r"(?<=[。！？!?\n])", text):
+        for seg in re.split(rf"(?<={punct}|[\n])", text):
             seg = seg.strip()
             if not seg:
                 continue

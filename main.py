@@ -1148,26 +1148,45 @@ class CosyVoicePlugin(Star):
             if bilingual:
                 # 双语（外文 + 中文翻译）：语音只念外文（去中文），显示保留双语原文，
                 # 不做翻译（避免中文音色把外文翻成中文念出来，也避免整段把中文念出来）。
-                audio_text = _strip_chinese(full_text)
+                # 括号内容同样不朗读（v2.4.0 修：此前只有非翻译路径剥括号，双语/翻译
+                # 路径的括号内容会被念出来）；显示侧仍保留带括号原文。
+                _skip_bracket = bool(cfg.get("skip_bracket_tts", True))
+                audio_text = _strip_chinese(
+                    self._strip_brackets(full_text) if _skip_bracket else full_text
+                )
                 segs = self.engine.split_text(full_text)
-                # 多段/单段都走逐段发送：每段语音取「去中文后的外文」；纯中文段（去中文后无外文）
-                # 发送时跳过语音、只发文字（见 _background_speak 的 _has_foreign 判断）。
-                seg_items = [(seg, _strip_chinese(seg)) for seg in segs]
+                # 多段/单段都走逐段发送：每段语音取「剥括号+去中文后的外文」；处理后
+                # 无外文的段（纯中文/纯括号）发送时跳过语音、只发文字
+                # （见 _background_speak 的 _has_foreign 判断）。
+                seg_items = [
+                    (seg, _strip_chinese(self._strip_brackets(seg) if _skip_bracket else seg))
+                    for seg in segs
+                ]
                 display_text = full_text
             elif tmode == "original":
                 # 只显示原文：不翻译，分段留给语音侧按 segment_punct 处理
                 pass
             else:
-                # 按「换行 + 句末标点」切原文，逐段单独翻译（每段是完整语义单元，翻译更准）
+                # 按「换行 + 句末标点」切原文，逐段单独翻译（每段是完整语义单元，翻译更准）。
+                # 翻译前先按 skip_bracket_tts 剥掉该段括号内容（v2.4.0 修：此前括号内容
+                # 会被一并翻译、并随译文语音念出来）；display 的原文仍保留括号，
+                # 括号内容照旧由 bracket_text 通道单独处理。
+                _skip_bracket = bool(cfg.get("skip_bracket_tts", True))
                 segs = self.engine.split_text(full_text)
                 if len(segs) > 1:
                     pairs = []
                     for seg in segs:
+                        seg_for_tts = self._strip_brackets(seg) if _skip_bracket else seg
+                        if not seg_for_tts.strip():
+                            # 整段只有括号内容：无可翻译/可念文本，译文置空——
+                            # 发送侧按「无外文/空文本」自然跳过该段语音，文字显示原文
+                            pairs.append((seg, ""))
+                            continue
                         try:
-                            t = await self.translator.maybe_translate(seg, target=vlang)
+                            t = await self.translator.maybe_translate(seg_for_tts, target=vlang)
                         except Exception as e:  # noqa: BLE001
                             logger.warning(f"[cosyvoice] 分段翻译异常，回退该段原文: {e}")
-                            t = seg
+                            t = seg_for_tts
                         pairs.append((seg, t))
                     # 仅当「确有段被翻译」才走译文排版；否则视为不需要翻译，
                     # 保持纯原文展示（不加「原文：」前缀，也不切译文语音）。
@@ -1181,11 +1200,17 @@ class CosyVoicePlugin(Star):
                             )
                         seg_items = pairs
                 else:
-                    # 单行无多段：整块翻译（保持原行为，避免无谓的逐段调用）
-                    try:
-                        translated = await self.translator.maybe_translate(full_text, target=vlang)
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(f"[cosyvoice] 翻译接入异常，回退原文: {e}")
+                    # 单行无多段：整块翻译（保持原行为，避免无谓的逐段调用）。
+                    # 同样先剥括号再翻（v2.4.0 修）；剥完为空（纯括号正文）则跳过翻译，
+                    # 交由后续「合成文本为空」的既有兜底跳过语音。
+                    seg_for_tts = self._strip_brackets(full_text) if _skip_bracket else full_text
+                    if seg_for_tts.strip():
+                        try:
+                            translated = await self.translator.maybe_translate(seg_for_tts, target=vlang)
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning(f"[cosyvoice] 翻译接入异常，回退原文: {e}")
+                            translated = seg_for_tts
+                    else:
                         translated = full_text
                     if translated and translated != full_text:
                         audio_text = translated
@@ -1350,7 +1375,11 @@ class CosyVoicePlugin(Star):
                     sent_any = False
                     text_sent = False  # 文字是否已发出（语音失败也补发文字）——已发则冷却回退不再补发
                     for orig, trans in seg_items:
-                        disp = trans if tmode == "translated" else (orig if bilingual else (f"{trans}\n中文：{orig}" if trans != orig else orig))
+                        if not trans.strip():
+                            # 整段只有括号内容（v2.4.0 起译文可能为空）：无可念译文，展示原文
+                            disp = orig
+                        else:
+                            disp = trans if tmode == "translated" else (orig if bilingual else (f"{trans}\n中文：{orig}" if trans != orig else orig))
                         # 标记由引擎在分段之后逐段注入：这里传【干净译文】，展示文字 disp 不带标记
                         if text_after_voice:
                             # 先语音后文字：语音成功先发语音，再发对应文字；语音失败也补发文字（不丢）

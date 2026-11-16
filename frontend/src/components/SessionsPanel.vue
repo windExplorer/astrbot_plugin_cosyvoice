@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="cv-page">
     <div class="cv-card">
       <div class="cv-toolbar">
@@ -248,48 +248,49 @@ async function toggleOn(row, val) {
     // 开关与概率同源：关 = 概率 0（移除配置）；开 = 常开（100%），随后可用概率框调低
     await bridge.apiPost('sessions/set', { origin: row.id, prob: val ? 1 : 0 })
     if (val) row.prob_percent = 100
+    // 本地更新该行即可（v2.4.0 起：不再整页 load() 重拉，避免列表闪烁与头像重取）
+    row.on = !!val
     ElMessage.success(val ? '已开启语音' : '已关闭语音')
-    await load()
   } catch (e) {
+    row.on = !val // 失败回滚开关
     ElMessage.error('操作失败：' + e)
-    await load()
   }
 }
 
 async function saveProb(row, val) {
   const pct = Number(val)
   if (!Number.isFinite(pct)) return
+  const prev = row.prob_percent
   try {
     await bridge.apiPost('sessions/set', { origin: row.id, prob: pct / 100 })
+    // 概率与开关同源：0% = 关闭、≥100% = 常开
+    row.on = pct > 0
     ElMessage.success(
       pct <= 0 ? '已关闭该会话语音' : pct >= 100 ? '已设为常开（每句都念）' : `已设为 ${pct}% 概率发语音`,
     )
-    await load()
   } catch (e) {
+    row.prob_percent = prev // 失败回滚
     ElMessage.error('保存失败：' + e)
-    await load()
   }
 }
 
 async function saveMode(row, val) {
   try {
     await bridge.apiPost('sessions/set', { origin: row.id, send_mode: val || '' })
+    row.mode = { both: '语音+文字', voice_only: '仅语音' }[val] || '默认(跟随全局)'
     ElMessage.success('已保存发送方式')
-    await load()
   } catch (e) {
     ElMessage.error('保存失败：' + e)
-    await load()
   }
 }
 
 async function saveVoice(row, val) {
   try {
     await bridge.apiPost('sessions/set', { origin: row.id, voice: val || '' })
+    row.voice = val || '默认'
     ElMessage.success('已保存音色')
-    await load()
   } catch (e) {
     ElMessage.error('保存失败：' + e)
-    await load()
   }
 }
 

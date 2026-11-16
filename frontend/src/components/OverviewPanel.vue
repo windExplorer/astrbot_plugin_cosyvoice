@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="cv-page">
     <div class="cv-stats">
       <div class="cv-stat" :class="ov.client_ready ? 'ok' : 'bad'">
@@ -96,13 +96,10 @@ function joinArr(a) {
   return a.join('、')
 }
 
+// overview 后端已带 voices_count，无需再单独拉一次 /voices（v2.4.0 修：去掉重复请求）
 async function load() {
   try {
-    const [o, vc] = await Promise.all([
-      bridge.apiGet('overview'),
-      bridge.apiGet('voices').catch(() => ({ voices: [] })),
-    ])
-    ov.value = { ...o, voices_count: (vc.voices || []).length }
+    ov.value = await bridge.apiGet('overview')
   } catch (e) {
     ElMessage.error('加载概览失败：' + e)
   }

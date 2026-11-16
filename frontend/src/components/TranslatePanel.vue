@@ -136,7 +136,7 @@
       />
       <div style="margin-top: 10px">
         <el-button type="primary" :loading="testing" :icon="VideoPlay" @click="runTest">测试翻译</el-button>
-        <el-button type="success" :icon="Check" @click="save">保存配置</el-button>
+        <el-button type="success" :icon="Check" :loading="saving" @click="save">保存配置</el-button>
       </div>
 
       <el-alert
@@ -199,6 +199,7 @@ const config = reactive({
 
 const testSample = ref('Hello, this is a test for translation.')
 const testing = ref(false)
+const saving = ref(false)
 const testResult = ref(null)
 
 function addRow(list) { list.push({ key: '', value: '' }) }
@@ -218,11 +219,15 @@ async function load() {
 }
 
 async function save() {
+  if (saving.value) return
+  saving.value = true
   try {
     await bridge.apiPost('translate', JSON.parse(JSON.stringify(config)))
     ElMessage.success('已保存并立即生效')
   } catch (e) {
     ElMessage.error('保存失败：' + e)
+  } finally {
+    saving.value = false
   }
 }
 

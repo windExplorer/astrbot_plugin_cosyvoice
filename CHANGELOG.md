@@ -2,6 +2,90 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.4.0 (2026-11-17)
+
+- feat: **分段修复四连 + WebUI 配置页可编辑（schema 驱动）+ 分段试算 + 试听内播**。
+- fix(分段): **`segment_first_len` 填 `0,0` 会把事件循环卡死**（死循环）。
+  - 根因：`_seg_first_window()` 只对 `"0"`/空串回退到普通窗口，`"0,0"` 会被 `_parse_len_range`
+    解析成 `(0, 0)` 放行；`_split_window` 的 while 循环里 `end = min(start + 0, n) = start`、
+    窗口内必然找不到符号、truncate 的 `cut = start`——`start` 永不推进，`while start < n`
+    在协程里原地打转，整个 AstrBot 事件循环挂死。
+  - 修复：`_seg_first_window()` 解析不出有效上界（`hi <= 0`）一律回退 `_seg_window()`；
+    循环内再加兜底 `fw_hi <= 0 → 用 (lo, hi)`，保证 `start` 必然推进。
+  - 附带：首段的 `min` 本就不参与切分（短段合并统一由末尾 `_merge_short` 按 `segment_len`
+    的 min 处理），循环里只取上界，注释写明。
+- fix(分段): **seek 模式在长文下形同虚设**。
+  - 根因：无标点分支外层有一个「剩余长度超硬上限就整体放弃 seek」的条件
+    （`hard_cap > 0 and n - start > hard_cap` 时直接退 truncate），而 seek 到目标符号的距离
+    检查在**内层**已经存在——外层条件多余且有害：文本只要比 `max_text_len` 长一次，
+    seek 就必然退化成 truncate，哪怕标点就在窗口后几个字。
+  - 修复：重写为「seek 找窗口后第一个符号——找到且 ≤ 硬上限 → 切；找到但超硬上限 →
+    退 truncate；到结尾没找到 → 剩余 ≤ 硬上限时整段收尾、否则 truncate 硬切」。
+    seek 真正可用，同时无标点长文（错误信息/英文等）仍不会 seek 出超硬上限的超长段。
+- fix(分段): **配置口径三处漂移**。
+  - `segment_punct` 留空时的代码回退集是 `，。！？；：、,.!?;:`（含逗号/顿号/冒号），
+    与 `_conf_schema.json` 默认值及 hint 宣称的「留空等同默认 `。！？.!?`」不一致——
+    留空和填默认值行为不同。统一为 `。！？.!?`。
+  - `max_text_len` 缺键时代码兜底 `0`（=无上限），schema 默认 200：个别老配置/部分导入
+    场景丢键会让硬切失效。缺键兜底改为 200（显式 0 仍表示不限制）。
+  - `segment_len` 关闭（旧分段逻辑）时写死按 `。！？!?` 切，配置的 `segment_punct` 不生效；
+    改为沿用配置符号（换行始终保留为边界）。
+- fix(括号): **翻译/双语路径漏剥括号，`skip_bracket_tts` 在翻译场景失效**。
+  - 根因：括号剥离只发生在非翻译路径（pairs 分段前 `vseg = _strip_brackets(seg)`）与指令路径；
+    翻译分支的分段与翻译都在**含括号原文**上做，括号内容被一并翻译、随后随译文语音念出来。
+  - 修复：翻译/双语路径逐段翻译前先 `_strip_brackets(seg)`（白名单标记照旧保护），
+    display 侧 pairs 仍保留带括号原文；整段只有括号内容时译文置空——发送侧按
+    「无外文/空文本」自然跳过语音、文字显示原文（`_background_speak` 的 disp 分支补了
+    空译文处理）。voice_only 与 both 逐段两个消费点共用同一份 seg_items，一处修全生效。
+- feat(WebUI): **「配置」页从只读展示改为可编辑（schema 驱动，永不缺键）**。
+  - 旧实现手写 28 个键的展示字典，缺 13 个键（`auto_breath` / `auto_effect` /
+    `effect_intensity` / `segment_first_nopunct` / `segment_nopunct` / `text_after_voice` /
+    `skip_bracket_tts` / `translate_display_mode` / `agent_intermediate_tts` + 文件服务 4 键），
+    且每加一个配置键都要手工同步——已经漂移过一次。
+  - 新实现：`GET /config` 返回 `_conf_schema.json` 原文 + 当前完整值 + 分组映射，
+    前端按 schema 渲染控件（bool→开关、int/float→数字、string+options→下拉、
+    list→标签输入、`servers`→表格编辑器、`voices`→只读提示走音色管理页）；
+    分组映射 `_CONFIG_GROUPS` 覆盖全部键，**漏网的键自动落进「其他」组**，不再漏键。
+  - 保存：`POST /config` 严走 schema 白名单 + 类型强转校验（枚举/结构非法直接 400），
+    写入 AstrBot 注入的 `AstrBotConfig` 并 `save_config_async()` 落盘（异常回退同步
+    `save_config()`）——与官方「插件配置」弹窗写同一份
+    `data/config/astrbot_plugin_cosyvoice_config.json`，双向一致；保存后
+    `_refresh_cfg()` 立即热生效（引擎音色/分流节点/冷却时长同步刷新）。
+  - 脏检测 + 每分组「保存/还原」按钮，只提交改动键；切页签丢失未保存改动（有提示）。
+- feat(WebUI): **分段试算**——「分段」分组底部粘贴文本点「试算」，
+  `POST /segment_preview` 纯切分（`split_text_pairs` + `split_text`，**不触合成服务端**），
+  展示语音段/文字段数、每段字数与内容、当前生效的分段参数；文字段数与语音段数不同
+  （短行文字按原始换行发送）时有提示。调 `segment_len` / `segment_punct` / nopunct 规则
+  不用再靠猜。
+- fix(WebUI): **试听在真实 Dashboard 里放不出声**。
+  - 根因：试听走 `bridge.download`，但 AstrBot 桥接的 download 是「触发浏览器下载到磁盘」
+    （锚点点击），页面拿不到 blob——旧代码兼容的 `{blob}` 形态只有 vite dev 路径能给，
+    内嵌 iframe 下必然抛「未获取到音频」。
+  - 修复：`/synthesize` 支持 `inline=1`，返回 JSON `{ok, mime, data_uri}`（wav base64，
+    10MB 上限防超长文本），前端 `apiGet('synthesize', {..., inline:1})` 直接把 data URI
+    塞给 `<audio>` 播放——dev 与真实 Dashboard 都能页面内播放；不带 `inline` 的
+    wav 文件下载行为保留。
+- chore(WebUI): 请求与状态瘦身。
+  - 概览页去掉重复的 `GET /voices`（overview 已带 `voices_count`）。
+  - 会话页开关/概率/发送方式/音色保存后**就地更新该行**，不再整页 `load()` 重拉
+    （列表不闪烁、头像不重取）；删除/清空仍全量刷新。失败回滚本地状态。
+  - 音色批量操作改 `Promise.allSettled` 并发 + busy 态；试听/保存按钮补 loading；
+    移除无用的 `isDark`/`onPlay` 死代码与 5 个 `.vue` 的 UTF-8 BOM。
+  - 删除后端死端点：`voices/hidden`、`sessions/batch_off`、`avatars/refresh`
+    （前端从未调用，UI 对应功能早已改走其他端点）。
+- 验证：
+  - 分段回归（临时脚本不入库，`uv run --no-project --with httpx`，桩 `astrbot.api` 加载磁盘真代码）：
+    20/20 通过——覆盖 `0,0` 不再死循环（守护线程 6s 看门狗）、seek 长文找近标点 / 目标超上限退
+    truncate / 结尾无标点收尾、空 punct 回退集、逗号不切、legacy 用自定义符号、
+    `max_text_len` 缺键兜底、首段独立窗口、短段合并、换行短行合并、pairs 配对不丢文字、
+    `_strip_brackets`（AST 抠取）剥括号且保白名单标记。
+  - webapi 配置层回归：18/18 通过（bool/int/float/枚举/list/servers 结构强转与拒绝、
+    分组全键覆盖 + 漏键进「其他」、schema 读取与缓存）。
+  - 桩桥浏览器冒烟（构建产物 + 注入 `window.AstrBotPluginPage` 桩 + 本地服务）：
+    5 个页签全部渲染无 JS 错误；配置页 6 分组控件齐全、改 `segment_len` 后保存只提交
+    `{segment_len}`、试算出段数字数；试听 `audio.src` 为 data URI 且带 `inline=1`。
+- 版本 v2.3.1 -> v2.4.0。
+
 ## v2.3.1 (2026-10-10)
 
 - fix: **同一句话被念/发两遍**——结果链文本存在「紧邻重复」时，先折叠再合成（`_collapse_adjacent_repeats`）。

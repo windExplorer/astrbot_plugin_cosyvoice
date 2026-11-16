@@ -9,8 +9,11 @@ endpoint 不带前缀）。
 - 会话（unified_msg_origin）维度的开关/音色/发送方式直接复用插件内存态
   （plugin._sessions / _voices / _sendmodes），写操作调用插件的 _save_*
   持久化到 data/ 目录（与聊天指令 /tts_on 等同源，热生效、重启不丢）；
-- 音色（voices）由配置 _conf_schema.json 的 template_list 提供，WebUI 只读 +
-  快捷操作（设默认/隐藏），不在此写入配置（配置热更由 Dashboard 配置页负责）。
+- 配置（v2.4.0 起）：GET /config 返回 _conf_schema.json + 当前值（schema 驱动，
+  界面永不缺键）；POST /config 写入 AstrBot 注入的 AstrBotConfig 并 save_config
+  持久化——与官方「插件配置」弹窗同一份文件，双向一致、热生效；
+- 音色（voices）由 WebUI 音色库（data/tts_voices_lib.json）+ 配置 voices 合成生效，
+  增删改走 voices/create|update|delete，不经过配置接口。
 """
 
 from __future__ import annotations
@@ -25,14 +28,6 @@ from astrbot.api.web import error_response, json_response, request
 PLUGIN_ROUTE_PREFIX = "astrbot_plugin_cosyvoice"
 
 
-def json_dumps(value) -> str:
-    """安全地转 JSON 字符串（供配置展示用）。"""
-    try:
-        return json.dumps(value, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(value)
-
-
 def register_web_apis(plugin) -> None:
     """把 WebUI 后端 API 注册到插件 Context。
 
@@ -42,21 +37,20 @@ def register_web_apis(plugin) -> None:
     p = PLUGIN_ROUTE_PREFIX
 
     ctx.register_web_api(f"/{p}/overview", _overview(plugin), ["GET"], "CosyVoice 概览（服务端健康/全局开关）")
-    ctx.register_web_api(f"/{p}/config", _get_config(plugin), ["GET"], "CosyVoice 配置（分组只读）")
+    ctx.register_web_api(f"/{p}/config", _get_config(plugin), ["GET"], "CosyVoice 配置（schema 驱动读取）")
+    ctx.register_web_api(f"/{p}/config", _save_config(plugin), ["POST"], "CosyVoice 配置（保存，热生效）")
+    ctx.register_web_api(f"/{p}/segment_preview", _segment_preview(plugin), ["POST"], "分段试算（纯切分不触服务端）")
     ctx.register_web_api(f"/{p}/voices", _list_voices(plugin), ["GET"], "CosyVoice 音色列表")
     ctx.register_web_api(f"/{p}/voices/create", _create_voice(plugin), ["POST"], "新增音色")
     ctx.register_web_api(f"/{p}/voices/update", _update_voice(plugin), ["POST"], "编辑音色")
     ctx.register_web_api(f"/{p}/voices/delete", _delete_voice(plugin), ["POST"], "删除音色")
     ctx.register_web_api(f"/{p}/voices/default", _set_default_voice(plugin), ["POST"], "设置默认音色")
-    ctx.register_web_api(f"/{p}/voices/hidden", _set_voice_hidden(plugin), ["POST"], "隐藏/显示音色")
     ctx.register_web_api(f"/{p}/sessions", _list_sessions(plugin), ["GET"], "会话语音状态列表")
     ctx.register_web_api(f"/{p}/sessions/set", _set_session(plugin), ["POST"], "按会话设置语音开关/音色/发送方式")
     ctx.register_web_api(f"/{p}/sessions/delete", _delete_session(plugin), ["POST"], "删除会话语音状态")
     ctx.register_web_api(f"/{p}/sessions/clear", _clear_sessions(plugin), ["POST"], "清空全部会话语音状态")
-    ctx.register_web_api(f"/{p}/sessions/batch_off", _batch_off(plugin), ["POST"], "批量关闭会话语音")
     ctx.register_web_api(f"/{p}/avatars", _list_avatars(plugin), ["GET"], "批量取会话头像（data URI）")
-    ctx.register_web_api(f"/{p}/avatars/refresh", _refresh_avatars(plugin), ["POST"], "更新头像缓存")
-    ctx.register_web_api(f"/{p}/synthesize", _synthesize(plugin), ["GET", "POST"], "合成试听（返回 wav 下载）")
+    ctx.register_web_api(f"/{p}/synthesize", _synthesize(plugin), ["GET", "POST"], "合成试听（wav 下载或 inline data URI）")
     ctx.register_web_api(f"/{p}/translate", _translate_config(plugin), ["GET", "POST"], "翻译配置（读取/保存）")
     ctx.register_web_api(f"/{p}/translate/test", _translate_test(plugin), ["POST"], "翻译配置测试")
     logger.info(f"[cosyvoice] WebUI API 已注册（前缀 /api/plug/{p}/）")
@@ -157,48 +151,243 @@ def _overview(plugin):
     return handler
 
 
-# ---------- 配置（分组只读，供「配置」tab 展示） ----------
+# ---------- 配置（schema 驱动，可查看/编辑） ----------
+# 配置组映射：key → 组名。刻意与 _conf_schema.json 的键**全量**对齐——
+# 新增配置键只需改这张表（漏掉的键自动落进「其他」组，不会从界面上消失）。
+_CONFIG_GROUPS: dict[str, list[str]] = {
+    "服务端": [
+        "base_url", "servers", "server_voices_dir", "sample_rate",
+        "timeout", "tts_queue_max_position",
+    ],
+    "触发与范围": [
+        "auto_tts", "tts_scope", "agent_intermediate_tts", "enable_llm_tool",
+        "enable_user_trigger", "trigger_keywords", "text_keywords",
+        "blocklist", "allowlist", "translate_display_mode",
+    ],
+    "发送与展示": [
+        "send_mode", "text_after_voice", "skip_bracket_tts",
+        "send_via_file_service", "file_service_transcode_mp3",
+        "file_service_mp3_bitrate", "file_service_token_ttl",
+    ],
+    "分段": [
+        "segment_len", "segment_first_len", "segment_punct",
+        "segment_first_nopunct", "segment_nopunct", "segment_merge",
+        "max_text_len", "split_by_newline", "newline_min_len",
+        "text_split_keep_newline",
+    ],
+    "音效标记": ["auto_breath", "auto_effect", "effect_intensity"],
+    "服务与容错": [
+        "default_voice", "tts_concurrency", "tts_max_retry",
+        "tts_retry_backoff", "tts_cooldown_sec",
+    ],
+}
+
+# 已分组的 key 反查集合（用于把未覆盖的键归入「其他」）
+_GROUPED_KEYS = {k for keys in _CONFIG_GROUPS.values() for k in keys}
+
+_CONF_SCHEMA_CACHE: dict = {"path": None, "data": None}
+
+
+def _load_conf_schema(plugin) -> dict:
+    """读取插件根目录的 _conf_schema.json（带缓存；读不到返回空 dict）。"""
+    import os as _os
+
+    path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                         "_conf_schema.json")
+    cached = _CONF_SCHEMA_CACHE
+    if cached["path"] == path and cached["data"] is not None:
+        return cached["data"]
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[cosyvoice] 读取 _conf_schema.json 失败（配置页将退化为纯展示）: {e}")
+        data = {}
+    _CONF_SCHEMA_CACHE["path"] = path
+    _CONF_SCHEMA_CACHE["data"] = data
+    return data
+
+
+def _build_config_groups(cfg: dict) -> dict:
+    """按 _CONFIG_GROUPS 归组；未覆盖的键自动归入「其他」，保证不漏键。"""
+    groups: dict[str, list[str]] = {}
+    for gname, keys in _CONFIG_GROUPS.items():
+        hit = [k for k in keys if k in cfg]
+        if hit:
+            groups[gname] = hit
+    others = [k for k in cfg if k not in _GROUPED_KEYS and k != "voices"]
+    if others:
+        groups["其他"] = others
+    return groups
+
+
+def _coerce_config_value(key: str, value, sch: dict):
+    """按 schema 类型强转/校验单个配置值。合法返回 (True, 值)；非法返回 (False, 错误信息)。"""
+    t = str(sch.get("type") or "string").strip().lower()
+    if t == "bool":
+        if isinstance(value, bool):
+            return True, value
+        s = str(value).strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True, True
+        if s in ("false", "0", "no", "off", ""):
+            return True, False
+        return False, f"{key}: 无法识别的布尔值 {value!r}"
+    if t == "int":
+        try:
+            return True, int(float(value))
+        except (TypeError, ValueError):
+            return False, f"{key}: 必须是整数，收到 {value!r}"
+    if t == "float":
+        try:
+            return True, float(value)
+        except (TypeError, ValueError):
+            return False, f"{key}: 必须是数字，收到 {value!r}"
+    if t == "string":
+        s = str(value)
+        options = sch.get("options")
+        if options and s not in options:
+            return False, f"{key}: 只能是 {'/'.join(map(str, options))} 之一，收到 {s!r}"
+        return True, s
+    if t == "list":
+        if not isinstance(value, list):
+            return False, f"{key}: 必须是数组，收到 {type(value).__name__}"
+        return True, [str(v) for v in value]
+    if t == "template_list":
+        # 目前只有 servers 用到：条目结构 {url, enabled, default, weight}
+        if not isinstance(value, list):
+            return False, f"{key}: 必须是数组，收到 {type(value).__name__}"
+        out = []
+        for i, item in enumerate(value):
+            if not isinstance(item, dict):
+                return False, f"{key}[{i}]: 必须是对象"
+            out.append({
+                "url": str(item.get("url") or "").strip(),
+                "enabled": bool(item.get("enabled", True)),
+                "default": bool(item.get("default", False)),
+                "weight": _coerce_config_value(f"{key}[{i}].weight", item.get("weight", 1),
+                                               {"type": "int"})[1],
+            })
+        return True, out
+    return True, value  # 未知类型放行（保持原值）
+
+
 def _get_config(plugin):
     async def handler():
         plugin._refresh_cfg()
         cfg = plugin.config
-        groups = {
-            "服务端": {
-                "服务地址 (base_url)": cfg.get("base_url", ""),
-                "服务端列表 (servers)": json_dumps(cfg.get("servers") or []),
-                "服务端音频目录 (server_voices_dir)": cfg.get("server_voices_dir", "") or "",
-                "采样率 (sample_rate)": cfg.get("sample_rate", 24000),
-                "请求超时/秒 (timeout)": cfg.get("timeout", 150),
-                "排队阈值 (tts_queue_max_position)": cfg.get("tts_queue_max_position", 8),
-            },
-            "语音行为": {
-                "自动语音 (auto_tts)": bool(cfg.get("auto_tts", False)),
-                "发送方式 (send_mode)": cfg.get("send_mode", "both"),
-                "语音范围 (tts_scope)": cfg.get("tts_scope", "llm_only"),
-                "默认音色 (default_voice)": plugin._effective_default_voice(),
-                "LLM 工具 (enable_llm_tool)": bool(cfg.get("enable_llm_tool", True)),
-                "关键词触发 (enable_user_trigger)": bool(cfg.get("enable_user_trigger", True)),
-                "触发关键词 (trigger_keywords)": cfg.get("trigger_keywords", []),
-                "纯文字关键词 (text_keywords)": cfg.get("text_keywords", []),
-                "黑名单 (blocklist)": cfg.get("blocklist", []),
-                "白名单 (allowlist)": cfg.get("allowlist", []),
-                "并发上限 (tts_concurrency)": cfg.get("tts_concurrency", 1),
-            },
-            "分段与重试": {
-                "分段字数 (segment_len)": cfg.get("segment_len", 0),
-                "首段字数 (segment_first_len)": cfg.get("segment_first_len", 0),
-                "分段符号 (segment_punct)": cfg.get("segment_punct", ""),
-                "单段硬上限 (max_text_len)": cfg.get("max_text_len", 200),
-                "按换行分段 (split_by_newline)": bool(cfg.get("split_by_newline", True)),
-                "换行最小字数 (newline_min_len)": cfg.get("newline_min_len", 10),
-                "文字仍按换行分段 (text_split_keep_newline)": bool(cfg.get("text_split_keep_newline", True)),
-                "合并单条发送 (segment_merge)": bool(cfg.get("segment_merge", False)),
-                "失败重试 (tts_max_retry)": cfg.get("tts_max_retry", 0),
-                "重试退避 (tts_retry_backoff)": cfg.get("tts_retry_backoff", 0.5),
-                "冷却时长/秒 (tts_cooldown_sec)": cfg.get("tts_cooldown_sec", 30),
-            },
+        return json_response({
+            "values": dict(cfg),
+            "schema": _load_conf_schema(plugin),
+            "groups": _build_config_groups(cfg),
+            "effective_default_voice": plugin._effective_default_voice(),
+        })
+
+    return handler
+
+
+def _save_config(plugin):
+    """保存插件配置（写入 AstrBot 注入的 AstrBotConfig 并持久化，热生效）。
+
+    与官方「插件配置」弹窗写的是同一份配置文件（data/config/<名>_config.json），
+    双向一致；保存后 _refresh_cfg() 让引擎/路由立即吃到新值。
+    """
+    async def handler():
+        payload = await request.json(default={})
+        if not isinstance(payload, dict) or not payload:
+            return error_response("缺少要保存的配置键值对", status_code=400)
+        schema = _load_conf_schema(plugin)
+        if not schema:
+            return error_response("无法读取 _conf_schema.json，配置编辑不可用", status_code=500)
+
+        coerced: dict = {}
+        for key, value in payload.items():
+            key = str(key)
+            if key == "voices":
+                return error_response("音色请在「音色管理」页维护，不能通过配置接口修改", status_code=400)
+            sch = schema.get(key)
+            if sch is None:
+                return error_response(f"未知配置键「{key}」（不在 _conf_schema.json 中）", status_code=400)
+            ok, result = _coerce_config_value(key, value, sch)
+            if not ok:
+                return error_response(result, status_code=400)
+            coerced[key] = result
+        if not coerced:
+            return error_response("没有可保存的配置键", status_code=400)
+
+        conf = plugin._injected_config
+        if conf is None or not isinstance(conf, dict):
+            return error_response("插件配置对象不可用（非 AstrBotConfig 注入）", status_code=500)
+        conf.update(coerced)
+        saved = False
+        try:
+            save_async = getattr(conf, "save_config_async", None)
+            if save_async is not None:
+                await save_async()
+                saved = True
+            else:
+                conf.save_config()
+                saved = True
+        except Exception as e:  # noqa: BLE001
+            # 异步保存失败再试同步保存（AstrBotConfig 两者都有；极端情况落盘失败仍热生效）
+            try:
+                conf.save_config()
+                saved = True
+            except Exception as e2:  # noqa: BLE001
+                logger.error(f"[cosyvoice] WebUI 保存配置落盘失败: {e2}（首次异常: {e}）")
+                return error_response(f"配置已热生效但落盘失败：{e2}", status_code=500)
+        plugin._refresh_cfg()
+        logger.info(f"[cosyvoice] WebUI 保存配置 {list(coerced)}（落盘={saved}）")
+        return json_response({
+            "ok": True,
+            "values": {k: plugin.config.get(k) for k in coerced},
+        })
+
+    return handler
+
+
+# ---------- 分段试算（纯切分，不触服务端） ----------
+def _segment_preview(plugin):
+    async def handler():
+        payload = await request.json(default={})
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            return error_response("缺少试算文本 text", status_code=400)
+        if len(text) > 20000:
+            return error_response("试算文本过长（>20000 字），请截取片段", status_code=400)
+        plugin._refresh_cfg()
+        engine = plugin.engine
+        try:
+            voice_segs = engine.split_text(text)
+            pairs = engine.split_text_pairs(text)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[cosyvoice] 分段试算异常: {e}")
+            return error_response(f"切分异常：{e}", status_code=500)
+        cfg = plugin.config
+        effective = {
+            "segment_len": cfg.get("segment_len", "0"),
+            "segment_first_len": cfg.get("segment_first_len", "0"),
+            "segment_punct": (str(cfg.get("segment_punct", "") or "").strip() or "。！？.!?（默认）"),
+            "segment_first_nopunct": cfg.get("segment_first_nopunct", "truncate"),
+            "segment_nopunct": cfg.get("segment_nopunct", "truncate"),
+            "segment_merge": bool(cfg.get("segment_merge", False)),
+            "max_text_len": plugin.engine._seg_hard_cap(),
+            "split_by_newline": bool(cfg.get("split_by_newline", True)),
+            "newline_min_len": engine._newline_min_len(),
+            "text_split_keep_newline": bool(cfg.get("text_split_keep_newline", True)),
         }
-        return json_response({"groups": groups})
+        return json_response({
+            "voice_segs": [{"text": s, "len": len(s)} for s in voice_segs],
+            "pairs": [
+                {
+                    "voice": v,
+                    "len": len(v),
+                    "texts": [{"text": t, "len": len(t)} for t in ts],
+                }
+                for v, ts in pairs
+            ],
+            "effective": effective,
+        })
 
     return handler
 def _list_voices(plugin):
@@ -326,28 +515,6 @@ def _set_default_voice(plugin):
         plugin._save_default_voice_override(name)
         plugin._refresh_cfg()  # 让 engine.config 的 default_voice 立即更新
         return json_response({"ok": True, "default_voice": name})
-
-    return handler
-
-
-# ---------- 隐藏/显示音色 ----------
-def _set_voice_hidden(plugin):
-    async def handler():
-        payload = await request.json(default={})
-        name = str(payload.get("name") or "").strip()
-        hidden = bool(payload.get("hidden", False))
-        all_voices = plugin._effective_voices()
-        if name not in all_voices:
-            return error_response(f"没有「{name}」这个音色", status_code=400)
-        # 仅 WebUI 音色库中的音色可持久改 hidden；配置音色由配置页管理（此处仅热生效）
-        if name in plugin._voices_lib:
-            plugin._voices_lib[name]["hidden"] = hidden
-            plugin._save_voices_lib()
-        else:
-            plugin.engine.voices[name]["hidden"] = hidden
-        plugin._refresh_cfg()
-        logger.info(f"[cosyvoice] WebUI 切换音色「{name}」hidden={hidden}")
-        return json_response({"ok": True})
 
     return handler
 
@@ -510,21 +677,6 @@ def _set_session(plugin):
     return handler
 
 
-# ---------- 批量关闭会话语音 ----------
-def _batch_off(plugin):
-    async def handler():
-        payload = await request.json(default={})
-        origins = payload.get("origins")
-        if origins is None:
-            return error_response("缺少 origins 列表", status_code=400)
-        for origin in origins:
-            plugin._sessions.pop(str(origin), None)
-        plugin._save_sessions()
-        return json_response({"ok": True, "closed": len(origins)})
-
-    return handler
-
-
 # ---------- 删除单个会话语音状态 ----------
 def _delete_session(plugin):
     async def handler():
@@ -621,41 +773,31 @@ def _list_avatars(plugin):
     return handler
 
 
-def _refresh_avatars(plugin):
-    """更新头像缓存：body ``{type?, ids?}``；``ids`` 为空表示把该类型已缓存的全部重取。"""
-    async def handler():
-        cache = getattr(plugin, "avatars", None)
-        if cache is None:
-            return error_response("头像缓存未初始化", status_code=500)
-        payload = await request.json(default={})
-        kind = str(payload.get("type") or "user").strip().lower()
-        if kind not in ("user", "group"):
-            return error_response("type 只能是 user / group", status_code=400)
-        ids = payload.get("ids")
-        if not isinstance(ids, list) or not ids:
-            ids = cache.cached_ids(kind)
-        if not ids:
-            return json_response({"refreshed": 0, "failed": 0, "stats": cache.stats()})
-        got = await cache.ensure(kind, ids, force=True)
-        return json_response({
-            "refreshed": len(got),
-            "failed": max(0, len(ids) - len(got)),
-            "stats": cache.stats(),
-        })
-
-    return handler
-
-
 # ---------- 合成试听 ----------
+# inline 模式返回 data URI 的体积上限（base64 后），超出提示缩短文本。
+# 24kHz/16bit/单声道 wav ≈ 48KB/s，10MB ≈ 3.5 分钟语音，试听场景足够宽裕。
+_INLINE_MAX_BYTES = 10 * 1024 * 1024
+
+
 def _synthesize(plugin):
     async def handler():
-        # 支持 GET(query) 与 POST(json)：bridge.download 走 GET。
+        # 支持 GET(query) 与 POST(json)；inline=1 时返回 JSON data URI（页面内直接
+        # <audio> 播放）——真实 Dashboard 的 bridge.download 只触发「下载到磁盘」、
+        # 拿不到 blob，页面内播放必须走这条 JSON 通道（v2.4.0 修）。
         text = str(request.query.get("text") or "").strip()
         voice = str(request.query.get("voice") or "").strip() or None
-        if not text:
-            payload = await request.json(default={})
-            text = str(payload.get("text") or "").strip()
-            voice = str(payload.get("voice") or "").strip() or None
+        inline = str(request.query.get("inline") or "").strip().lower()
+        if not text or not inline:
+            try:
+                payload = await request.json(default={})
+            except Exception:  # noqa: BLE001
+                payload = {}
+            if not text:
+                text = str(payload.get("text") or "").strip()
+            if not voice:
+                voice = str(payload.get("voice") or "").strip() or None
+            if not inline:
+                inline = str(payload.get("inline") or "").strip().lower()
         if not text:
             return error_response("缺少试听文本", status_code=400)
 
@@ -691,6 +833,26 @@ def _synthesize(plugin):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[cosyvoice] 试听音频复制到预览目录失败: {e}")
             target = wav_path
+
+        if inline in ("1", "true", "yes", "on"):
+            import base64
+
+            try:
+                size = _os.path.getsize(target)
+                if size > _INLINE_MAX_BYTES:
+                    return error_response(
+                        f"试听音频过大（{size / 1024 / 1024:.1f}MB），请缩短文本后重试",
+                        status_code=400,
+                    )
+                with open(target, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("ascii")
+                return json_response({
+                    "ok": True,
+                    "mime": "audio/wav",
+                    "data_uri": f"data:audio/wav;base64,{b64}",
+                })
+            except OSError as e:
+                return error_response(f"读取试听音频失败：{e}", status_code=500)
 
         return file_response(target, filename=f"cosyvoice_{safe_name}.wav", content_type="audio/wav")
 

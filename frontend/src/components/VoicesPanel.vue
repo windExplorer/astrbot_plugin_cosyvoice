@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="cv-page">
     <!-- 顶部工具条 -->
     <div class="cv-card cv-toolbar">
@@ -36,7 +36,7 @@
       <div class="cv-audition-head">
         <el-icon class="cv-audition-ico"><Headset /></el-icon>
         <span class="cv-section-title" style="margin: 0">试听</span>
-        <span class="cv-muted">输入文本后点任意音色的「试听」即可播放（开启翻译时非目标语种会先翻译）</span>
+        <span class="cv-muted">输入文本后点任意音色的「试听」即可在页面内播放（开启翻译时非目标语种会先翻译）</span>
       </div>
       <el-input
         v-model="auditionText"
@@ -46,8 +46,8 @@
         style="margin: 10px 0"
       />
       <div class="cv-audition-bar">
-        <el-button type="primary" :icon="VideoPlay" :disabled="!auditionText.trim()" @click="auditionDefault">试听（默认音色）</el-button>
-        <audio ref="audioRef" :src="audioSrc" controls class="cv-audio" @ended="onEnded" @play="onPlay" />
+        <el-button type="primary" :icon="VideoPlay" :disabled="!auditionText.trim() || auditionLoading" :loading="auditionLoading" @click="auditionDefault">试听（默认音色）</el-button>
+        <audio ref="audioRef" :src="audioSrc" controls class="cv-audio" @ended="onEnded" />
         <span v-if="playing" class="cv-muted">正在试听：{{ playing }}</span>
       </div>
     </div>
@@ -57,9 +57,9 @@
       <div v-if="selected.length" class="cv-batchbar">
         <span>已选 <b>{{ selected.length }}</b> 个</span>
         <div class="cv-spacer" />
-        <el-button size="small" @click="batchHide(false)">批量显示</el-button>
-        <el-button size="small" @click="batchHide(true)">批量隐藏</el-button>
-        <el-button size="small" type="danger" plain @click="batchDelete">批量删除</el-button>
+        <el-button size="small" :disabled="batchBusy" @click="batchHide(false)">批量显示</el-button>
+        <el-button size="small" :disabled="batchBusy" @click="batchHide(true)">批量隐藏</el-button>
+        <el-button size="small" type="danger" plain :disabled="batchBusy" @click="batchDelete">批量删除</el-button>
         <el-button size="small" text @click="selected = []">取消</el-button>
       </div>
     </transition>
@@ -99,7 +99,7 @@
               {{ v.prompt_text || '（无参考文本）' }}
             </div>
             <div class="cv-voice-actions">
-              <el-button size="small" :icon="VideoPlay" @click="audition(v)">试听</el-button>
+              <el-button size="small" :icon="VideoPlay" :disabled="auditionLoading" @click="audition(v)">试听</el-button>
               <el-button size="small" :icon="Star" @click="setDefault(v)" :disabled="v.is_default">设为默认</el-button>
               <el-button size="small" :icon="Edit" @click="openEdit(v)">编辑</el-button>
               <el-button size="small" type="danger" plain :icon="Delete" @click="remove(v)" />
@@ -160,7 +160,7 @@
       </el-form>
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
-        <el-button type="primary" @click="saveEdit">保存</el-button>
+        <el-button type="primary" :loading="saving" @click="saveEdit">保存</el-button>
       </template>
     </el-dialog>
   </div>
@@ -174,7 +174,6 @@ import {
 } from '@element-plus/icons-vue'
 
 const bridge = inject('bridge')
-const bridgeCtx = inject('bridgeCtx')
 
 const LANG_OPTIONS = [
   'zh', 'en', 'ja', 'ko', 'ru', 'th', 'ar', 'hi',
@@ -191,13 +190,14 @@ const selected = ref([])
 const audioRef = ref(null)
 const audioSrc = ref('')
 const playing = ref('')
+const auditionLoading = ref(false)
 const auditionText = ref('你好，这是一段音色试听。')
 
 const editVisible = ref(false)
 const isEdit = ref(false)
+const saving = ref(false)
+const batchBusy = ref(false)
 const editForm = reactive({ name: '', prompt_wav: '', prompt_text: '', language: '', hidden: false, markup: true })
-
-const isDark = computed(() => bridgeCtx && bridgeCtx.value && bridgeCtx.value.isDark)
 
 const langOptions = computed(() => {
   const s = new Set()
@@ -266,32 +266,36 @@ async function load() {
   }
 }
 
+// 试听：走 inline data URI（后端 synthesize?inline=1 返回 JSON）。
+// 历史：旧实现走 bridge.download，但真实 Dashboard 的 download 是「触发浏览器下载」、
+// 拿不到 blob，导致页面 <audio> 永远放不出声（v2.4.0 改走 JSON data URI 通道）。
 async function playVoice(vname) {
   if (!auditionText.value.trim()) {
     ElMessage.warning('请先填写试听文本')
     return
   }
+  if (auditionLoading.value) return
+  auditionLoading.value = true
   playing.value = vname || '默认音色'
   try {
-    const params = vname ? { voice: vname, text: auditionText.value } : { text: auditionText.value }
-    const res = await bridge.download('synthesize', params)
-    // 兼容 bridge 返回字符串 URL 或 { blob, filename } 两种形态
-    let url = ''
-    if (typeof res === 'string') url = res
-    else if (res && res.blob) url = URL.createObjectURL(res.blob)
-    if (!url) throw new Error('未获取到音频')
-    audioSrc.value = url
+    const params = { text: auditionText.value, inline: 1 }
+    if (vname) params.voice = vname
+    const res = await bridge.apiGet('synthesize', params)
+    const uri = res && res.data_uri
+    if (!uri) throw new Error((res && res.message) || '未获取到音频')
+    audioSrc.value = uri
     await nextTick()
     if (audioRef.value) await audioRef.value.play()
   } catch (e) {
-    ElMessage.error('试听失败：' + e)
+    ElMessage.error('试听失败：' + (e?.message || e))
     playing.value = ''
+  } finally {
+    auditionLoading.value = false
   }
 }
 async function audition(v) { await playVoice(v.name) }
 async function auditionDefault() { await playVoice('') }
 function onEnded() { playing.value = '' }
-function onPlay() { /* noop */ }
 
 async function setDefault(v) {
   try {
@@ -326,6 +330,8 @@ async function saveEdit() {
     ElMessage.warning('请填写音色名')
     return
   }
+  if (saving.value) return
+  saving.value = true
   const payload = {
     name: editForm.name.trim(),
     prompt_wav: editForm.prompt_wav,
@@ -342,6 +348,8 @@ async function saveEdit() {
     await load()
   } catch (e) {
     ElMessage.error('保存失败：' + e)
+  } finally {
+    saving.value = false
   }
 }
 async function remove(v) {
@@ -360,9 +368,15 @@ async function remove(v) {
 }
 
 async function batchHide(h) {
-  for (const n of selected.value) {
-    try { await bridge.apiPost('voices/update', { name: n, hidden: h }) } catch (e) { ElMessage.error(e) }
-  }
+  if (batchBusy.value) return
+  batchBusy.value = true
+  const results = await Promise.allSettled(
+    selected.value.map((n) => bridge.apiPost('voices/update', { name: n, hidden: h })),
+  )
+  batchBusy.value = false
+  const failed = results.filter((r) => r.status === 'rejected').length
+  if (failed) ElMessage.error(`${failed} 个音色操作失败`)
+  else ElMessage.success('批量操作完成')
   selected.value = []
   await load()
 }
@@ -372,9 +386,15 @@ async function batchDelete() {
   } catch {
     return
   }
-  for (const n of selected.value) {
-    try { await bridge.apiPost('voices/delete', { name: n }) } catch (e) { ElMessage.error(e) }
-  }
+  if (batchBusy.value) return
+  batchBusy.value = true
+  const results = await Promise.allSettled(
+    selected.value.map((n) => bridge.apiPost('voices/delete', { name: n })),
+  )
+  batchBusy.value = false
+  const failed = results.filter((r) => r.status === 'rejected').length
+  if (failed) ElMessage.error(`${failed} 个音色删除失败`)
+  else ElMessage.success('批量删除完成')
   selected.value = []
   await load()
 }

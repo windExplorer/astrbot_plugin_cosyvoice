@@ -42,14 +42,15 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 - **概览**：服务端健康（各节点在线/冷却剩余秒/异常次数）、全局配置（自动语音/发送方式/范围/默认音色/采样率）、统计。
 - **音色管理**：按**语种分组**展示与筛选，搜索、内联试听（顶部输入文本点任意音色即播放）、**新增/编辑/删除（二次确认）**与批量显示/隐藏/删除，每条含参考音频/参考文本/语种标签。
 - **翻译合成**：翻译总开关、目标语种（默认 `zh`）、需翻译语种白名单（留空=除目标语种外全部）；通用翻译 API 适配器（URL/方法/API Key/认证头/scheme/额外请求头/参数模板 `{text}` `{source}` `{target}`/响应解析路径/超时）全字段配置，含「测试」显示检测语种与译文。配置存插件自有 `data/translate_config.json`，保存即热生效。
-- **会话管理**：按会话（origin）查看/切换语音开关、音色、发送方式，搜索 + 批量关闭。
-- **配置**：当前生效配置分组只读展示（服务端 / 语音行为 / 分段与重试），修改请到 AstrBot 配置弹窗。
+- **会话管理**：按会话（origin）查看/切换语音开关、概率、音色、发送方式，展示群名 / QQ 昵称与头像，编辑就地生效。
+- **配置**（v2.4.0 起可编辑）：按 `_conf_schema.json` 驱动分组展示全部配置项（服务端 / 触发与范围 / 发送与展示 / 分段 / 音效标记 / 服务与容错），直接编辑、保存立即热生效并落盘；「分段」分组内置**分段试算**——粘贴一段文本即可预览当前配置会切成几段、每段多少字，调参不用再猜。
 
-**与配置弹窗的关系（解耦）**：
+**与配置弹窗的关系**：
 
-- 会话开关/会话音色/发送方式、WebUI 设置的默认音色，均存插件自有 `data/tts_*.json`（与聊天指令 `/tts_on`、`/tts_voice` 同源），**重启不丢、热生效**，与 AstrBot 主配置解耦。
-- **WebUI 里新增/编辑/删除的音色** 存插件自有 `data/tts_voices_lib.json`，优先于 AstrBot 配置弹窗中的 voices（同名的以 WebUI 为准）。配置弹窗中的音色仍可显示与试听，但增删改只在 WebUI 音色库中生效；配置型音色想删需去配置弹窗。
-- 试听每次合成后自动下载 wav 到本地，不依赖服务端直链端点。
+- WebUI「配置」页与 AstrBot 官方「插件配置」弹窗写的是**同一份**配置文件（`data/config/astrbot_plugin_cosyvoice_config.json`），两边改动双向一致、均热生效；界面按 schema 渲染，不会漏键。
+- 会话开关/会话音色/发送方式、WebUI 设置的默认音色，存插件自有 `data/tts_*.json`（与聊天指令 `/tts_on`、`/tts_voice` 同源），**重启不丢、热生效**，与 AstrBot 主配置解耦。
+- **WebUI 里新增/编辑/删除的音色** 存插件自有 `data/tts_voices_lib.json`，优先于配置中的 voices（同名的以 WebUI 为准）；配置页的 voices 项只读提示、不在此编辑。
+- 试听音频在页面内直接播放（后端 `synthesize?inline=1` 返回 data URI），不再触发浏览器下载。
 
 ## 配置（`_conf_schema.json`）
 
@@ -59,7 +60,8 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 | `servers` | `[]` | **多机分流**：可配置多台 CosyVoice 服务地址（`url` / `enabled` / `default` / `weight`），同时启用、按权重分流；「设为默认」的节点优先使用；某台故障自动临时隔离，其余节点继续服务 |
 | `server_voices_dir` | `""` | CosyVoice 服务端参考音频目录（填后 `prompt_wav` 只传文件名，服务端本地读，避免大文件重复上传） |
 | `sample_rate` | `24000` | 采样率（Hz）。插件首次合成时会向服务端 `/` 接口查询真实采样率并自动覆盖此值 |
-| `timeout` | `60` | 请求超时（秒） |
+| `timeout` | `150` | 请求超时（秒），队列版服务端需 ≥ 150 |
+| `tts_queue_max_position` | `8` | 排队阈值（繁忙判定，仅带 `X-Queue-Position` 头的服务生效；`0`=不限制） |
 | `default_voice` | `""` | 默认音色名 |
 | `voices` | `[]` | 音色列表（**template_list 逐条编辑**）：每条含「音色名 / 参考音频 / 参考文本」，可增删 |
 | `send_mode` | `both` | `both` / `voice_only` |
@@ -73,9 +75,26 @@ AstrBot 插件：接入本地自建 **CosyVoice3** 推理服务，让机器人�
 | `text_keywords` | `["用文字","发文字","文字回复","别用语音","这段别念","不用语音念"]` | 纯文字请求关键词：即使已开语音，用户说这些词时**本条只发文字、不合成语音**（不改变 tts_on 开关）。需 `enable_user_trigger=true` |
 | `blocklist` / `allowlist` | `[]` | 会话/用户白黑名单 |
 | `send_mode` | `both` | `both` / `voice_only` |
-| `skip_bracket_tts` | `true` | **括号内容不朗读**：开启后正文被 `（）()` `[]` 包裹的文字不进入语音（详见下方说明） |
+| `skip_bracket_tts` | `true` | **括号内容不朗读**：开启后正文被 `（）()` `[]` 包裹的文字不进入语音（详见下方说明；v2.4.0 起翻译/双语路径同样生效） |
+| `text_after_voice` | `true` | 不合并 both 逐段发送时，每段先发语音还是先发文字 |
+| `translate_display_mode` | `both` | 翻译场景聊天气泡展示：`both`（译文+原文）/ `original` / `translated` |
+| `agent_intermediate_tts` | `true` | Agent（工具循环）中间轮正文是否也朗读 |
 | `split_by_newline` | `true` | 多行回复优先按换行分块合成（避免把换行念成噪音/静音） |
 | `newline_min_len` | `10` | **换行分段最小字数**：按换行切出的块短于此字数时与相邻块合并，避免「嗯」「好的」这类极短行各占一条语音（`0`=不合并）；`/tts1` 同样受此值控制 |
+| `text_split_keep_newline` | `true` | 换行分段时被合并的短行，聊天文字仍按原始换行逐条发送 |
+| `segment_len` | `"0"` | **分段回复字数「最小,最大」**（如 `30,50`）：在最大字窗口内取最后一个分段符号切分；最小是短段合并下限；`0`/留空=关闭（回退旧逻辑）。只填一个数字=只设最大、不合并 |
+| `segment_first_len` | `"0"` | **首段字数「最小,最大」**：首段独立窗口（更快出声）；`0`/留空=沿用 `segment_len` |
+| `segment_punct` | `"。！？.!?"` | **分段符号**（按字面匹配、自动转义）：分段只在完整语义句末符号处切，不含逗号/顿号；留空等同默认 |
+| `segment_first_nopunct` / `segment_nopunct` | `truncate` | 首段/普通段窗口内无符号时的处理：`truncate`（窗口末硬切）或 `seek`（往后找第一个符号，距离受 `max_text_len` 约束） |
+| `segment_merge` | `false` | 分段是否合并为**单条**语音发送（false=逐段流式发送） |
+| `max_text_len` | `200` | 单段硬上限：`segment_len` 关闭时作旧分段窗口；开启时仅作「无标点硬切」兜底（`0`=不限制） |
+| `tts_concurrency` | `1` | 同时打到服务端的合成请求数（弱服务端保持 1） |
+| `tts_max_retry` / `tts_retry_backoff` | `0` / `0.5` | 失败重试次数 / 指数退避基数（默认 0=不重试，一次失败进冷却） |
+| `tts_cooldown_sec` | `30` | 服务端失败后的冷却时长，冷却内直接回退文字 |
+| `auto_breath` | `true` | 自动标点换气（句末 `[breath]`、句中 `[quick_breath]`） |
+| `auto_effect` / `effect_intensity` | `false` / `medium` | 关键词音效开关 / 密度（`light`/`medium`/`strong`，仅开启后生效） |
+| `send_via_file_service` | `false` | 语音走 AstrBot 文件服务 URL 发送（绕开 base64，需已配置 `callback_api_base`） |
+| `file_service_transcode_mp3` / `file_service_mp3_bitrate` / `file_service_token_ttl` | `false` / `64` / `900` | 转码 MP3（需 ffmpeg）/ 码率 / 文件链接有效期（秒） |
 
 ### 翻译合成配置
 
