@@ -293,7 +293,10 @@ class CosyVoiceClient:
         with open(path, "rb") as f:
             data = f.read()
         if len(self._wav_cache) >= _WAV_CACHE_MAX:
-            self._wav_cache.clear()
+            # FIFO 逐出最旧一项（dict 保持插入序）；v2.5.0 前是整表 clear——
+            # 一满就把所有条目清空，下一个音色要全部重读
+            oldest = next(iter(self._wav_cache))
+            self._wav_cache.pop(oldest, None)
         self._wav_cache[key] = data
         return data
 

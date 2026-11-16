@@ -14,10 +14,14 @@ from astrbot.api import logger
 
 
 def _tmp_path(suffix: str, cache_dir: str) -> str:
+    # mkstemp 原子创建（tempfile.mktemp 已弃用：名字非原子，存在被抢占的理论竞态）
     if cache_dir:
         os.makedirs(cache_dir, exist_ok=True)
-        return tempfile.mktemp(suffix=suffix, dir=cache_dir)
-    return tempfile.mktemp(suffix=suffix)
+        fd, path = tempfile.mkstemp(suffix=suffix, dir=cache_dir)
+    else:
+        fd, path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    return path
 
 
 def pcm_to_wav_bytes(pcm: bytes, sample_rate: int = 24000) -> bytes:

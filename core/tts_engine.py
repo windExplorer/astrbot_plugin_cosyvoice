@@ -467,8 +467,11 @@ class TtsEngine:
                 # 实际没有换行（或短行已全部并入同一块）：退化为整段处理（与原行为一致）
                 return self._split_window(blocks[0] if blocks else text)
             chunks: list = []
-            for b in blocks:
-                chunks.extend(self._split_window(b))
+            for i, b in enumerate(blocks):
+                # 首段快窗口只属于整条回复的第一段（v2.5.0 修：此前每个行块都各自从
+                # is_first=True 起步，多行回复每一行的第一段都会套 segment_first_len，
+                # 与「首段更快出声」的语义不符）
+                chunks.extend(self._split_window(b, is_first=(i == 0)))
             return chunks
 
         return self._split_window(text)
@@ -576,8 +579,12 @@ class TtsEngine:
         except (TypeError, ValueError):
             return 10
 
-    def _split_window(self, text: str) -> list:
-        """按标点窗口对单段文本分段（被 split_text 调用，可能按行多次调用）。"""
+    def _split_window(self, text: str, is_first: bool = True) -> list:
+        """按标点窗口对单段文本分段（被 split_text 调用，可能按行多次调用）。
+
+        is_first：本块是否从整条回复的第一段起步（决定首段是否套 segment_first_len
+        快窗口）。多行回复只有第一行块传 True（见 _split_text_raw）。
+        """
         text = (text or "").strip()
         if not text:
             return []
@@ -598,7 +605,6 @@ class TtsEngine:
             n = len(text)
             chunks: list = []
             start = 0
-            is_first = True
             while start < n:
                 # 首段可用独立的 segment_first_len 上界；其 min 不参与本循环
                 # （短段合并统一由末尾 _merge_short 按 segment_len 的 min 处理）。
@@ -911,6 +917,10 @@ class TtsEngine:
         """
         name, prompt_wav, prompt_text = self.resolve_voice(voice_name)
         if name is None:
+            # 与 synthesize 对齐：维护 last_failure（v2.5.0——此前逐段路径从不设置，
+            # 调用方读到的失败原因是上一轮 synthesize 的陈旧值）
+            self.last_failure = "未配置任何可用音色"
+            self.last_failure_kind = "config"
             logger.warning(
                 f"[cosyvoice] 未配置任何可用音色，跳过语音合成。"
                 f"运行实例读到的 raw voices={repr(self.config.get('voices'))[:300]}"
@@ -922,8 +932,12 @@ class TtsEngine:
             text = await self._maybe_translate(text, voice_lang=vlang)
         chunks = [c for c in self.split_text(text) if is_speakable(c)]
         if not chunks:
+            self.last_failure = "无有效可合成文本（分段后全为空/占位符）"
+            self.last_failure_kind = "content"
             logger.debug("[cosyvoice] 无有效可合成文本，跳过语音合成")
             return
+        self.last_failure = ""
+        self.last_failure_kind = ""
         kwargs = self._wav_kwargs(prompt_wav, prompt_text)
         total = len(chunks)
         for i, ch in enumerate(chunks, 1):
@@ -940,14 +954,20 @@ class TtsEngine:
                     pcm = await self.client.synthesize(
                         voiced, mode="zero_shot", check_queue=(i == 1), **kwargs
                     )
-            except CosyVoiceServerError:
+            except CosyVoiceServerError as e:
+                self.last_failure = str(e) or "语音服务器失联"
+                self.last_failure_kind = "server"
                 raise
-            except QueueFullError:
+            except QueueFullError as e:
                 # 繁忙（排队过长）同样视为「环境暂不可用」，中断逐段循环向上抛，
                 # 避免后面每段都白等一次排队、拖到超时
+                self.last_failure = str(e) or "语音服务器繁忙（排队过长）"
+                self.last_failure_kind = "server"
                 raise
             except Exception as e:  # noqa: BLE001
                 logger.error(f"[cosyvoice] 单段合成失败已跳过: {e}")
+                self.last_failure = str(e)
+                self.last_failure_kind = "server"
                 yield ch, None
                 continue
             if pcm:
@@ -955,6 +975,8 @@ class TtsEngine:
                 logger.info(f"[cosyvoice] 合成 {i}/{total} OK | {dt:.0f}ms {len(pcm)}字节PCM")
                 yield ch, audio.pcm_to_wav_file(pcm, self.client.sample_rate, self.client.cache_dir)
             else:
+                self.last_failure = "服务端返回空音频"
+                self.last_failure_kind = "server"
                 yield ch, None
 
     async def iter_segment_wavs(self, text: str, voice_name: str | None = None, *, pre_translated: bool = False):

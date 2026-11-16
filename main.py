@@ -208,8 +208,10 @@ class CosyVoicePlugin(Star):
         # 让 WebUI 能独立管理音色，不被 _refresh_cfg 用配置覆盖。
         self._voices_lib_file = os.path.join(data_dir, "tts_voices_lib.json")
         self._voices_lib = self._load_voices_lib()
-        # WebUI 概览「最近事件」环形缓冲（进程内，不持久化；最多 20 条）
-        self._recent_events = []
+        # WebUI 概览「最近事件」环形缓冲（v2.5.0 起为 200 条持久化任务历史，
+        # data/tts_tasklog.json；概览时间线取最近 20 条，「日志」页全量展示）
+        self._tasklog_file = os.path.join(data_dir, "tts_tasklog.json")
+        self._recent_events = self._load_tasklog()
         # 会话级昵称（按群/私聊持久记忆）：unified_msg_origin -> 昵称（best-effort，取自事件 get_sender_name()）
         self._nickname_file = os.path.join(data_dir, "tts_nicknames.json")
         self._nicknames = self._load_nicknames()
@@ -297,6 +299,33 @@ class CosyVoicePlugin(Star):
             self._last_llm.pop(origin, None)
             self._last_user_msg.pop(origin, None)
 
+    def _register_decorated(self, origin: str, key: str):
+        """登记「该文本已处理」去重键（_decorated 的统一入口）。
+
+        键一律用 full_key（去空白）——v2.5.0 前成功路径登记 raw full_text、检查用
+        full_key，登记的键永远匹配不上（纯死重）；此处统一并按 20 条截断防膨胀。
+        """
+        bucket = self._decorated.setdefault(origin, set())
+        bucket.add(key)
+        if len(bucket) > 20:
+            self._decorated[origin] = set(list(bucket)[-20:])
+
+    def _schedule_audio_cleanup(self, path: str):
+        """合成音频文件的延迟清理（统一入口）。
+
+        默认 60s；开启「语音走文件服务 URL 发送」时延长到 链接有效期 TTL + 30s——
+        文件链接的拉取窗口远长于 60s，v2.5.0 前 wav 60s 就删，慢协议端可能还没拉走
+        链接目标文件就没了（表现为偶发「语音发不出/拉取失败」）。转码 mp3 的清理
+        由 audio_delivery 自行按 TTL+30 处理，不受此影响。
+        """
+        delay = 60.0
+        if (self.config or {}).get("send_via_file_service"):
+            try:
+                delay = max(delay, float((self.config or {}).get("file_service_token_ttl", 900)) + 30.0)
+            except (TypeError, ValueError):
+                delay = 930.0
+        audio.schedule_cleanup(path, delay=delay)
+
     # ---------- _last_llm 读写（统一带时效，见 LAST_LLM_TTL） ----------
     def _set_last_llm(self, origin: str, text: str) -> None:
         """记录本轮模型原文（附带时间戳，供 _get_last_llm 做时效校验）。"""
@@ -320,11 +349,14 @@ class CosyVoicePlugin(Star):
             return ""
         return text or ""
 
-    def _push_event(self, ok: bool, msg: str):
-        """记录一条『最近事件』（进程内环形缓冲，供 WebUI 概览展示）。
+    def _push_event(self, ok: bool, msg: str, **extra):
+        """记录一条任务/事件日志（环形 200 条，最新在前）。
 
-        仅内存保存（最多 20 条，最新在前），不持久化；插件重载即清空，
-        定位为实时健康流水，而非审计日志。
+        v2.5.0 起从「20 条内存时间线」升级为「200 条持久化任务历史」：
+        落盘 data/tts_tasklog.json（重启不丢），供 WebUI 概览时间线（取最近 20 条）
+        与「日志」页（全量 + 筛选）展示。extra 可带任务上下文：
+        origin（会话短标签）/ voice / chars / segs / duration_ms / kind。
+        落盘失败只打 debug，不影响主流程。
         """
         ev = getattr(self, "_recent_events", None)
         if ev is None:
@@ -334,9 +366,24 @@ class CosyVoicePlugin(Star):
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
             "ok": bool(ok),
             "msg": str(msg)[:200],
+            **extra,
         })
-        if len(ev) > 20:
-            del ev[20:]
+        if len(ev) > 200:
+            del ev[200:]
+        try:
+            os.makedirs(os.path.dirname(self._tasklog_file), exist_ok=True)
+            with open(self._tasklog_file, "w", encoding="utf-8") as f:
+                json.dump(ev, f, ensure_ascii=False)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[cosyvoice] 任务日志落盘失败: {e}")
+
+    def _load_tasklog(self) -> list:
+        try:
+            with open(self._tasklog_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
 
     def _mark_server_ok(self):
         """合成成功：解除熔断冷却，并复位失联提示标志，便于下次真的失联时再提示。"""
@@ -369,7 +416,7 @@ class CosyVoicePlugin(Star):
             f"[cosyvoice] 进入冷却 | send_mode={send_mode} text_in_chain={text_in_chain}"
         )
         self._trip_breaker()
-        self._push_event(False, tip)
+        self._push_event(False, tip, origin=event.unified_msg_origin, kind="cooldown")
         if not self._server_down:
             self._server_down = True
             try:
@@ -762,7 +809,7 @@ class CosyVoicePlugin(Star):
         recs = []
         for p in paths:
             recs.append(Comp.Record(file=p, url=p))
-            audio.schedule_cleanup(p)
+            self._schedule_audio_cleanup(p)
         return recs
 
     async def _realtime_send(self, event: AstrMessageEvent, records: list) -> bool:
@@ -807,7 +854,9 @@ class CosyVoicePlugin(Star):
                 await send(chain)
                 logger.info(f"[cosyvoice] 主动推送成功(event.send) 组件={types}")
                 for _t in plain_texts:
-                    self._sent_spoken_texts[_t] = time.time()
+                    # 登记键与钩子查询键保持一致（去空白归一化）——v2.5.0 前此处登记
+                    # 原文，回环去重对含空白的文本必然 miss（回环拦截部分失明）
+                    self._sent_spoken_texts[re.sub(r"\s+", "", _t)] = time.time()
                 return True
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[cosyvoice] event.send 也失败: {e} | 组件={types}")
@@ -1047,6 +1096,7 @@ class CosyVoicePlugin(Star):
 
         # 已含语音则不重复
         if any(isinstance(c, Comp.Record) for c in chain):
+            self._clear(event, clear_llm=True)
             return
 
         voice = self._get_flag(event, "voice", None) or self._session_voice(event)
@@ -1067,26 +1117,16 @@ class CosyVoicePlugin(Star):
         if has_media:
             text_in_chain = True
 
-        # 服务端熔断冷却期：不再向服务端发任何请求，直接回退文字，避免一直卡着连文字也不发。
-        # 文字在结果链（合并 both）会正常发出；已移除（voice_only / 不合并 both）需补发回去。
-        if self._server_cooldown_until and time.time() < self._server_cooldown_until:
-            # 冷却期内原本静默回退文字，导致「为什么突然不发语音了」完全无从排查。
-            # 这里补一条 WARNING，带上剩余冷却秒数，默认日志级别即可看见。
-            logger.warning(
-                f"[cosyvoice] 处于语音冷却期，本次不合成语音、只发文字 | "
-                f"剩余 {self._server_cooldown_until - time.time():.0f}s | "
-                f"冷却由上一次合成失败触发（时长见配置 tts_cooldown_sec，默认 30s）"
-            )
-            if not text_in_chain:
-                await self._fallback_text(event, full_text, send_mode, text_in_chain)
-            return
-
         # 防自触发循环：本插件用 context.send_message 主动推送的文字，会被 AStrBot 框架再次
         # 路由回本钩子（event 的 origin 变为机器人自身、与用户 origin 不同），使原 message_id /
         # origin 级去重失效，出现「合成→推送→再合成」、每条回复念两遍。这里用「最近主动推送过的
         # 文本」拦截这类二次触发（60s 窗口；正常用户连发相同内容极少，且只是本次不念、影响可忽略）。
         # 去重键：去掉全部空白后比较——同文本因换行/空格差异的重复触发也能命中
         # （此前用原文精确匹配，两次触发文本只差一个空白就会漏掉而重复合成/发文字）。
+        # v2.5.0：本块整体上移到冷却检查【之前】——冷却回退发出的文字会登记进
+        # _sent_spoken_texts，同一条消息在冷却期内被框架重复触发时，在这里命中拦截、
+        # 不再重复补发文字（旧顺序冷却分支先 return，永远走不到这里 → 冷却窗口内
+        # 每次重复触发都会再补发一遍文字）。
         full_key = re.sub(r"\s+", "", full_text)
         now = time.time()
         for _t in [k for k, ts in self._sent_spoken_texts.items() if ts < now - 60]:
@@ -1098,6 +1138,32 @@ class CosyVoicePlugin(Star):
             # 无论合并/逐段模式一律清链：文本已发过，链上再发就是重复。
             result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
             logger.info("[cosyvoice] 重复触发（主动推送回环）：跳过合成并移除链上文字，避免重复发送")
+            self._clear(event, clear_llm=True)
+            return
+
+        # 服务端熔断冷却期：不再向服务端发任何请求，直接回退文字，避免一直卡着连文字也不发。
+        # 文字在结果链（合并 both）会正常发出；已移除（voice_only / 不合并 both）需补发回去。
+        if self._server_cooldown_until and time.time() < self._server_cooldown_until:
+            # 冷却期内原本静默回退文字，导致「为什么突然不发语音了」完全无从排查。
+            # 这里补一条 WARNING，带上剩余冷却秒数，默认日志级别即可看见。
+            logger.warning(
+                f"[cosyvoice] 处于语音冷却期，本次不合成语音、只发文字 | "
+                f"剩余 {self._server_cooldown_until - time.time():.0f}s | "
+                f"冷却由上一次合成失败触发（时长见配置 tts_cooldown_sec，默认 30s）"
+            )
+            # 冷却期内的消息级去重（v2.5.0）：有真实 message_id 时登记 _spoken_msgs，
+            # 同一条消息被框架重复触发时命中拦截（合并 both 场景链上文字会随管线重复发出）。
+            # 无 message_id 的事件不登记文本键——它没有任务回调来清理，会永久阻塞同文本。
+            mid = getattr(event, "message_id", None)
+            if mid is not None and mid in self._spoken_msgs:
+                result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
+                self._clear(event, clear_llm=True)
+                return
+            if mid is not None:
+                self._spoken_msgs.add(mid)
+            if not text_in_chain:
+                await self._fallback_text(event, full_text, send_mode, text_in_chain)
+            self._clear(event, clear_llm=True)
             return
 
         # 本轮同一条消息若已成功合成过（框架可能重复触发 on_decorating_result），
@@ -1110,6 +1176,7 @@ class CosyVoicePlugin(Star):
             # 之前，不清链的话结果链文字会随管线再发一遍（用户日志里的「又重复了」即此因）。
             result.chain = [c for c in chain if not isinstance(c, Comp.Plain)]
             logger.info("[cosyvoice] 重复触发（文本已处理）：跳过合成并移除链上文字，避免重复发送")
+            self._clear(event, clear_llm=True)
             return
 
         # 防上游重试刷屏：上游（LLM 提供方）连接不稳会对同一条回复反复重试，每次重试是
@@ -1129,6 +1196,7 @@ class CosyVoicePlugin(Star):
                     f"[cosyvoice] 疑似上游重试（{common} 字公共前缀、间隔 {now - prev[0]:.1f}s）："
                     "跳过合成并移除链上文字，避免重复刷屏"
                 )
+                self._clear(event, clear_llm=True)
                 return
 
         voice_name, _, _ = self.engine.resolve_voice(voice)
@@ -1271,8 +1339,9 @@ class CosyVoicePlugin(Star):
         # 而 origin 级 full_text 去重可能因两次触发间结果链被改写（801 行移除 Plain）而失效。
         mid = getattr(event, "message_id", None) or f"{origin}#{full_text}"
         if mid in self._spoken_msgs:
+            self._clear(event, clear_llm=True)
             return
-        self._decorated.setdefault(origin, set()).add(full_key)
+        self._register_decorated(origin, full_key)
         self._spoken_msgs.add(mid)
         self._recent_texts[origin] = (now, full_key)
         # 同一会话新回复抢占旧任务：长任务（几十段）逐段合成会把服务端排队拉到分钟级，
@@ -1329,6 +1398,12 @@ class CosyVoicePlugin(Star):
         # 任务级超时基准：服务端排队积压时单段可达 ~110s，几十段的长任务若不设上限
         # 会霸占队列几十分钟。超过 _BG_MAX_SECS 放弃剩余段（抢占机制之外的双保险）。
         _bg_start = time.monotonic()
+        # 去重键与回滚哨兵（v2.5.0）：on_decorating_result 在任务启动前已把 full_key
+        # 预登记进 _decorated（拦截框架重复触发）；本任务【失败/取消/被新消息抢占】时
+        # 必须回滚——否则同文本重试永远命中去重、文字被剥、语音不发、无兜底（消息被
+        # 静默吞掉）。succeeded 只在成功收尾处置 True，finally 统一回滚。
+        full_key = re.sub(r"\s+", "", full_text)
+        succeeded = False
         # 实际合成的文本：audio_text 为译文（翻译命中时）或剥离括号的原文；
         # 空则无正文可念（纯括号），跳过合成。
         # 这里【保持干净文本】：副语言标记由引擎在【分段之后】逐段注入
@@ -1338,7 +1413,9 @@ class CosyVoicePlugin(Star):
         if not synth_text.strip():
             logger.info("[cosyvoice] 正文仅含括号内容，跳过语音合成（括号内容已按模式单独发送）")
             self._mark_server_ok()
-            self._decorated.setdefault(origin, set()).add(re.sub(r"\s+", "", display_text))
+            # 纯括号正文没有可合成内容：登记去重键、不再重试（此路径在 try 之前返回，
+            # 不参与下方 finally 回滚）
+            self._register_decorated(origin, full_key)
             return
         logger.info(
             f"[cosyvoice] 后台合成开始 | send_mode={send_mode} merge={merge} "
@@ -1364,8 +1441,12 @@ class CosyVoicePlugin(Star):
                             f"[cosyvoice] 后台合成失败（非服务端故障，不进冷却）: "
                             f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
                         )
+                        self._push_event(
+                            False, f"后台合成失败：{getattr(self.engine, 'last_failure', '') or '未知原因'}",
+                            origin=origin, kind="content",
+                        )
                     return
-                audio.schedule_cleanup(path)
+                self._schedule_audio_cleanup(path)
                 await self._realtime_send(event, [Comp.Record(file=path, url=path)])
             else:
                 if send_mode == "both" and seg_items:
@@ -1387,7 +1468,7 @@ class CosyVoicePlugin(Star):
                                 wav = await self.engine.synthesize(trans, voice, pre_translated=True)
                                 if wav:
                                     sent_any = True
-                                    audio.schedule_cleanup(wav)
+                                    self._schedule_audio_cleanup(wav)
                                     try:
                                         await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
                                     except Exception as e:  # noqa: BLE001
@@ -1414,7 +1495,7 @@ class CosyVoicePlugin(Star):
                                 wav = await self.engine.synthesize(trans, voice, pre_translated=True)
                                 if wav:
                                     sent_any = True
-                                    audio.schedule_cleanup(wav)
+                                    self._schedule_audio_cleanup(wav)
                                     try:
                                         await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
                                     except Exception as e:  # noqa: BLE001
@@ -1496,7 +1577,7 @@ class CosyVoicePlugin(Star):
                                 )
                                 if wav:
                                     sent_any = True
-                                    audio.schedule_cleanup(wav)
+                                    self._schedule_audio_cleanup(wav)
                                     try:
                                         await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
                                     except Exception as e:  # noqa: BLE001
@@ -1519,7 +1600,7 @@ class CosyVoicePlugin(Star):
                                 )
                                 if wav:
                                     sent_any = True
-                                    audio.schedule_cleanup(wav)
+                                    self._schedule_audio_cleanup(wav)
                                     try:
                                         await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
                                     except Exception as e:  # noqa: BLE001
@@ -1547,6 +1628,10 @@ class CosyVoicePlugin(Star):
                                     f"[cosyvoice] 后台合成失败（非服务端故障，不进冷却）: "
                                     f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
                                 )
+                                self._push_event(
+                                    False, f"后台合成失败：{getattr(self.engine, 'last_failure', '') or '未知原因'}",
+                                    origin=origin, kind="content",
+                                )
                             return
                     else:
                         # 单行（无换行/句末标点分段）：按语音合成的实际段边界（iter_segment_items）
@@ -1569,7 +1654,7 @@ class CosyVoicePlugin(Star):
                                 break
                             if wav:
                                 sent_any = True
-                                audio.schedule_cleanup(wav)
+                                self._schedule_audio_cleanup(wav)
                                 try:
                                     await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
                                 except Exception as e:  # noqa: BLE001
@@ -1601,6 +1686,10 @@ class CosyVoicePlugin(Star):
                                     f"[cosyvoice] 后台合成失败（非服务端故障，不进冷却）: "
                                     f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
                                 )
+                                self._push_event(
+                                    False, f"后台合成失败：{getattr(self.engine, 'last_failure', '') or '未知原因'}",
+                                    origin=origin, kind="content",
+                                )
                             return
                     # 括号内容已随正文（含括号的 display_text）一起发出，不再单独补发，
                     # 否则会与正文括号重复。skip_bracket_tts 只影响「语音是否念括号」，不影响文字。
@@ -1618,7 +1707,7 @@ class CosyVoicePlugin(Star):
                             wav = await self.engine.synthesize(trans, voice, pre_translated=True)
                             if wav:
                                 sent_any = True
-                                audio.schedule_cleanup(wav)
+                                self._schedule_audio_cleanup(wav)
                                 try:
                                     await self._realtime_send(event, [Comp.Record(file=wav, url=wav)])
                                 except Exception as e:  # noqa: BLE001
@@ -1638,13 +1727,17 @@ class CosyVoicePlugin(Star):
                                     f"[cosyvoice] 后台合成失败（非服务端故障，不进冷却）: "
                                     f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
                                 )
+                                self._push_event(
+                                    False, f"后台合成失败：{getattr(self.engine, 'last_failure', '') or '未知原因'}",
+                                    origin=origin, kind="content",
+                                )
                             return
                     else:
                         sent_any = False
                         async for wav in self.engine.iter_segment_wavs(synth_text, voice, pre_translated=True):
                             sent_any = True
                             rec = Comp.Record(file=wav, url=wav)
-                            audio.schedule_cleanup(wav)
+                            self._schedule_audio_cleanup(wav)
                             try:
                                 await self._realtime_send(event, [rec])
                             except Exception as e:  # noqa: BLE001
@@ -1665,16 +1758,23 @@ class CosyVoicePlugin(Star):
                                     f"[cosyvoice] 后台合成失败（非服务端故障，不进冷却）: "
                                     f"{getattr(self.engine, 'last_failure', '') or '未知原因'}"
                                 )
+                                self._push_event(
+                                    False, f"后台合成失败：{getattr(self.engine, 'last_failure', '') or '未知原因'}",
+                                    origin=origin, kind="content",
+                                )
                             return
-            # 幂等登记已在启动后台任务前（897 行）用 full_text 完成，这里不再重复登记，
-            # 仅标记服务端恢复正常 + 解除冷却；_spoken_msgs 由任务回调统一清理。
+            # 幂等登记已在启动后台任务前完成（预登记），此处把键换绑为「已成功」语义：
+            # _mark_server_ok 解除冷却；_spoken_msgs 由任务回调统一清理。
             self._mark_server_ok()
-            self._decorated.setdefault(origin, set()).add(full_text)
-            bucket = self._decorated.get(origin)
-            if bucket and len(bucket) > 20:
-                self._decorated[origin] = set(list(bucket)[-20:])
-            logger.info("[cosyvoice] 后台语音合成完成，已补发")
-            self._push_event(True, "后台语音合成完成并已发送")
+            self._register_decorated(origin, full_key)
+            succeeded = True
+            duration_ms = int((time.monotonic() - _bg_start) * 1000)
+            logger.info(f"[cosyvoice] 后台语音合成完成，已补发 | 耗时 {duration_ms}ms")
+            self._push_event(
+                True, "后台语音合成完成并已发送",
+                origin=origin, voice=voice or "", chars=len(full_text),
+                duration_ms=duration_ms, kind="auto",
+            )
         except QueueFullError:
             # 排队过长：服务端在线但繁忙，进冷却避免反复打繁忙服务器，提示稍后再试
             logger.warning("[cosyvoice] 语音服务器繁忙（排队过长），进入冷却并回退文字")
@@ -1691,6 +1791,11 @@ class CosyVoicePlugin(Star):
             await self._enter_cooldown(
                 event, send_mode, display_text, text_in_chain=text_in_chain
             )
+        finally:
+            # v2.5.0：未成功（失败/取消/被抢占）一律回滚预登记的去重键，允许后续重试。
+            # CancelledError 同样经过 finally（回滚后继续向调用方传播）。
+            if not succeeded:
+                self._decorated.get(origin, set()).discard(full_key)
 
     async def _fallback_text(
         self, event: AstrMessageEvent, full_text: str, send_mode: str,
@@ -1772,7 +1877,7 @@ class CosyVoicePlugin(Star):
             async for wav in self._iter_cmd_audio(text, self._session_voice(event), mode):
                 sent = True
                 yield event.chain_result([Comp.Record(file=wav, url=wav)])
-                audio.schedule_cleanup(wav)
+                self._schedule_audio_cleanup(wav)
             if not sent:
                 yield event.plain_result(empty_hint)
             else:
@@ -2001,6 +2106,19 @@ class CosyVoicePlugin(Star):
             f"全局默认音色：{default_voice or '（未配置）'}",
             f"发送方式：{sm_hint}",
         ]
+        # v2.5.0：服务端状态与近期任务统计（排障常用）
+        if self._server_cooldown_until and time.time() < self._server_cooldown_until:
+            lines.append(
+                f"服务端状态：冷却中（剩余 {self._server_cooldown_until - time.time():.0f}s，期间只发文字）"
+            )
+        else:
+            lines.append("服务端状态：正常")
+        last_fail = getattr(self.engine, "last_failure", "") or ""
+        if last_fail:
+            lines.append(f"上次失败原因：{last_fail}")
+        log = self._recent_events or []
+        ok_n = sum(1 for e in log if e.get("ok"))
+        lines.append(f"近期任务：{len(log)} 条（成功 {ok_n} / 失败 {len(log) - ok_n}），详情见 WebUI「日志」页")
         yield event.plain_result("\n".join(lines))
 
     # ---------- 使用帮助：/tts_help（只展示常用指令） ----------
@@ -2040,6 +2158,8 @@ class CosyVoicePlugin(Star):
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 f.write(json_str)
+            # v2.5.0：导出文件用完即弃——此前留在系统临时目录永不删除
+            audio.schedule_cleanup(tmp, delay=120.0)
         except Exception:
             tmp = None
         file_comp = getattr(Comp, "File", None)
@@ -2116,7 +2236,7 @@ class CosyVoicePlugin(Star):
                 if not path:
                     await self._realtime_send(event, [Comp.Plain("话到嘴边卡壳了，这次没念出来，待会儿再试试？")])
                     return "语音合成失败，已告知用户。"
-                audio.schedule_cleanup(path)
+                self._schedule_audio_cleanup(path)
                 # 生效发送方式为 both（tts_type/send_mode）时，语音之外补发文字；否则只发语音
                 if not await self._realtime_send(event, [Comp.Record(file=path, url=path)]):
                     # 合成成功但推送失败：如实上报，不再谎报「已发送给用户」
@@ -2132,7 +2252,7 @@ class CosyVoicePlugin(Star):
                     sent = True
                     if await self._realtime_send(event, [Comp.Record(file=wav, url=wav)]):
                         sent_ok = True
-                    audio.schedule_cleanup(wav)
+                    self._schedule_audio_cleanup(wav)
                 if not sent:
                     await self._realtime_send(event, [Comp.Plain("话到嘴边卡壳了，这次没念出来，待会儿再试试？")])
                     return "语音合成失败，已告知用户。"
@@ -2226,6 +2346,20 @@ class CosyVoicePlugin(Star):
         return "当前可用音色：" + "、".join(voices)
 
     async def terminate(self):
+        # v2.5.0：插件卸载/重载时取消全部在跑的合成任务——旧实现只清 _flags，
+        # 在跑任务放任自生自灭，会继续往已卸载的世界发消息、打已断开的服务端。
+        for t in list(self._origin_tasks.values()):
+            if t is not None and not t.done():
+                t.cancel()
+        self._origin_tasks.clear()
+        # 进程内状态清空（实例随卸载销毁，这里防卸载瞬间的半途访问与残留引用）
+        self._decorated.clear()
+        self._spoken_msgs.clear()
+        self._sent_spoken_texts.clear()
+        self._recent_texts.clear()
+        self._last_llm.clear()
+        self._last_user_msg.clear()
+        self._group_name_pending.clear()
         self._flags.clear()
         try:
             await self.avatars.close()

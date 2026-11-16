@@ -37,6 +37,7 @@ def register_web_apis(plugin) -> None:
     p = PLUGIN_ROUTE_PREFIX
 
     ctx.register_web_api(f"/{p}/overview", _overview(plugin), ["GET"], "CosyVoice 概览（服务端健康/全局开关）")
+    ctx.register_web_api(f"/{p}/tasklog", _tasklog(plugin), ["GET"], "CosyVoice 任务日志（最近 200 条，持久化）")
     ctx.register_web_api(f"/{p}/config", _get_config(plugin), ["GET"], "CosyVoice 配置（schema 驱动读取）")
     ctx.register_web_api(f"/{p}/config", _save_config(plugin), ["POST"], "CosyVoice 配置（保存，热生效）")
     ctx.register_web_api(f"/{p}/segment_preview", _segment_preview(plugin), ["POST"], "分段试算（纯切分不触服务端）")
@@ -146,6 +147,24 @@ def _overview(plugin):
             },
             "voice_count": len(plugin.engine.voices),
             "session_count": len(plugin._sessions),
+        })
+
+    return handler
+
+
+# ---------- 任务日志 ----------
+def _tasklog(plugin):
+    """任务/事件历史（plugin._recent_events 环形 200 条，持久化 data/tts_tasklog.json）。
+
+    返回 ``{events: [...], stats: {total, ok, failed}}``，最新在前；
+    每条含 time/ok/msg 及可选 origin/voice/chars/segs/duration_ms/kind。
+    """
+    async def handler():
+        events = list(getattr(plugin, "_recent_events", []) or [])
+        ok_n = sum(1 for e in events if e.get("ok"))
+        return json_response({
+            "events": events,
+            "stats": {"total": len(events), "ok": ok_n, "failed": len(events) - ok_n},
         })
 
     return handler

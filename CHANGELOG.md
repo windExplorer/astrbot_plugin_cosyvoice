@@ -2,6 +2,70 @@
 
 本文档记录插件各版本变更。版本号遵循语义化版本（MAJOR.MINOR.PATCH）。
 
+## v2.5.0 (2026-11-17)
+
+- fix(状态机): **合成失败/取消后 `_decorated` 去重键不回滚 → 同文本重试被静默吞掉**（本轮核心修复）。
+  - 根因：`on_decorating_result` 在启动后台任务【前】把 full_key 预登记进 `_decorated`
+    （拦截框架重复触发），但任务失败/被取消/被新消息抢占的路径从不移除该键——
+    服务端故障后冷却恢复，用户重发同样的话：命中去重 → 链上文字被剥掉 → 不合成、
+    不回退、不提示，**消息凭空消失**。且 `_decorated` 无 TTL，历史条目可存活数天。
+  - 修复：`_background_speak` 加 `succeeded` 哨兵 + `finally` 统一回滚——未成功收尾
+    一律 `discard(full_key)`（CancelledError 同样经过 finally，回滚后继续传播）。
+    登记点统一走 `_register_decorated(origin, key)`：v2.4.0 及之前成功路径登记 raw
+    `full_text`、检查用去空白 `full_key`，登记的键永远匹配不上（纯死重）；
+    空合成早退登记的又是 stripped display_text——三处统一。截断（20 条）移到登记处，
+    不再只依赖成功路径。
+- fix(状态机): **`_flags` 在 6 条早退路径泄漏**（每条消息一条，忙站数天不重启会一直涨）：
+  链上已有 Record、冷却回退、主动推送回环、`_decorated` 命中、上游重试拦截、
+  mid 重复——六处 return 前补 `_clear(clear_llm=True)`。
+- fix(状态机): **冷却窗口内重复补发文字**。
+  - 根因：冷却分支在「主动推送回环检查」**之前** return，冷却回退发出的文字虽会登记进
+    `_sent_spoken_texts`，但同一消息被框架重复触发时永远走不到检查 → 每次重复触发
+    都再补发一遍文字（voice_only / 不合并 both 场景）。
+  - 修复：回环检查块整体上移到冷却分支之前；冷却分支内补 `_spoken_msgs` 检查+登记
+    （仅在有真实 message_id 时登记——无 id 事件的文本键没有任务回调清理，登记会
+    永久阻塞同文本）。
+- fix(状态机): **`terminate()` 不取消在跑任务**：插件卸载/重载时 `_background_speak`
+  会继续往已卸载的世界发消息、打已断开的服务端。现在取消全部 `_origin_tasks`
+  并清空 `_decorated`/`_spoken_msgs`/`_sent_spoken_texts`/`_recent_texts`/
+  `_last_llm`/`_last_user_msg`/`_group_name_pending`。
+- fix(逐段): **`iter_segment_items` 从不维护 `last_failure`**——调用方读到的失败原因
+  是上一轮 `synthesize` 的陈旧值，逐段路径「不进冷却」的判定可能基于错误信息。
+  现在与 `synthesize` 对齐：进入时重置，失联/繁忙/单段异常/空 PCM 都设置
+  `last_failure(_kind)`。
+- fix(回环): `event.send` 兜底通道登记的回环键是原文（不去空白），回环去重对含
+  空白文本必然 miss——统一归一化（与 `context.send_message` 主通道一致）。
+- fix(文件服务): **wav 60s 就删，文件链接 TTL 却是 900s**——开启「语音走文件服务
+  URL 发送」后，慢协议端还没拉走链接目标，文件已删（偶发「语音发不出」）。
+  新增 `_schedule_audio_cleanup` 统一清理入口：文件服务开启时清理延迟 = TTL + 30s，
+  关闭时维持 60s。11 处调用点全部换走该入口。
+- fix(杂项): `/tts_export` 导出的 json 此前永久留在系统临时目录——发送后调度清理；
+  参考音频缓存 `_wav_cache` 满时由「整表 clear」改为 FIFO 逐出最旧一项（不再
+  一满全清、下一个音色全部重读）；`utils/audio.py` 的 `tempfile.mktemp`（已弃用、
+  非原子）改 `mkstemp`。
+- fix(分段): **首段快窗口跨行语义**——`_split_window` 参数化 `is_first`，多行回复
+  只有**第一行块**的第一段套 `segment_first_len`；此前每个行块都各自从首段起步，
+  多行回复每一行的第一段都享受快窗口（与「首段更快出声」的语义不符）。
+  单行行为、`/tts1` 指令行为不变。
+- feat(WebUI): **「日志」页（任务历史）**。
+  - `_push_event` 从「20 条内存时间线」升级为「200 条持久化任务历史」
+    （`data/tts_tasklog.json`，重启不丢），每条带 origin / voice / chars /
+    duration_ms / kind 上下文；概览时间线继续取最近 20 条，形状兼容。
+  - WebUI 新增「日志」tab：表格（时间/结果/会话/音色/字数/耗时/说明）+
+    全部/成功/失败筛选 + 会话搜索（`GET /tasklog`）。
+  - `/tts_status` 增强：补服务端冷却剩余秒、上次失败原因、近期任务统计。
+    后台合成完成日志补耗时。
+- 明确不修（避免误解为遗漏）：① 逐段路径的 re-split 短路——双重切分通常 no-op，
+  短路需要给 synthesize 加「信任已分段」参数，侵入大于收益；② Router 全节点冷却时
+  仍会向冷却节点发请求（「最后挣扎」设计，总比直接失败好）；③ `is_speakable` 对
+  每段重复清洗的微开销；④ 并发（tts_concurrency>1）下 `last_failure` 可能被另一
+  消息覆盖——默认并发 1 下不存在，文档口径为「排查时看日志页为准」。
+- 验证：回归 14/14（跨行首段新语义 + is_first 对照、0,0 死循环/seek/空 punct 回归、
+  缓存 FIFO、mkstemp、`_push_event` 扩展字段/200 截断/持久化读回——AST 抠真代码执行）；
+  `compileall` 全绿；桩桥冒烟 6 页签 0 JS 错误，日志页 4 条渲染、筛选 chips 与
+  会话号/音色/耗时列正确。
+- 版本 v2.4.0 -> v2.5.0。
+
 ## v2.4.0 (2026-11-17)
 
 - feat: **分段修复四连 + WebUI 配置页可编辑（schema 驱动）+ 分段试算 + 试听内播**。

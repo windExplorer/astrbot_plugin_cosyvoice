@@ -21,6 +21,7 @@
       <el-tab-pane label="音色管理" name="voices" />
       <el-tab-pane label="翻译合成" name="translate" />
       <el-tab-pane label="会话" name="sessions" />
+      <el-tab-pane label="日志" name="tasklog" />
       <el-tab-pane label="配置" name="config" />
     </el-tabs>
 
@@ -29,6 +30,7 @@
       <VoicesPanel v-else-if="activeTab === 'voices'" ref="voicesRef" />
       <TranslatePanel v-else-if="activeTab === 'translate'" ref="translateRef" />
       <SessionsPanel v-else-if="activeTab === 'sessions'" ref="sessionsRef" />
+      <TaskLogPanel v-else-if="activeTab === 'tasklog'" ref="tasklogRef" />
       <ConfigPanel v-else-if="activeTab === 'config'" ref="configRef" />
     </main>
   </div>
@@ -41,6 +43,7 @@ import OverviewPanel from './components/OverviewPanel.vue'
 import VoicesPanel from './components/VoicesPanel.vue'
 import TranslatePanel from './components/TranslatePanel.vue'
 import SessionsPanel from './components/SessionsPanel.vue'
+import TaskLogPanel from './components/TaskLogPanel.vue'
 import ConfigPanel from './components/ConfigPanel.vue'
 
 const ctx = inject('bridgeCtx')
@@ -51,6 +54,7 @@ const overviewRef = ref(null)
 const voicesRef = ref(null)
 const translateRef = ref(null)
 const sessionsRef = ref(null)
+const tasklogRef = ref(null)
 const configRef = ref(null)
 
 function refreshAll() {
@@ -59,6 +63,7 @@ function refreshAll() {
     voices: voicesRef,
     translate: translateRef,
     sessions: sessionsRef,
+    tasklog: tasklogRef,
     config: configRef,
   }
   const r = map[activeTab.value]
