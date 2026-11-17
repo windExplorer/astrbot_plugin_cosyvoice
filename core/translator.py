@@ -24,6 +24,31 @@ from astrbot.api import logger
 _LANG_ZH = "zh"
 _LANG_EN = "en"
 
+# detect_lang 只产出这些简码。配置侧常见的异写（zh-CN / Chinese / en-US …）必须
+# 先归一到同一套简码再比较，否则「纯中文 + zh-CN 音色」会被误判为需要翻译。
+_KNOWN_LANGS = {"zh", "en", "ja", "ko", "ru", "th", "ar", "hi"}
+_LANG_ALIASES = {
+    "chinese": "zh",
+    "english": "en",
+    "japanese": "ja",
+    "korean": "ko",
+    "russian": "ru",
+    "thai": "th",
+    "arabic": "ar",
+    "hindi": "hi",
+}
+
+
+def _norm_lang(code: str) -> str:
+    """把语种代码归一化到 detect_lang 使用的简码（zh-CN / Chinese → zh）。"""
+    c = (code or "").strip().lower().replace("_", "-")
+    if not c:
+        return c
+    if c in _LANG_ALIASES:
+        return _LANG_ALIASES[c]
+    base = c.split("-", 1)[0]
+    return base if base in _KNOWN_LANGS else c
+
 
 def detect_lang(text: str) -> str:
     """本地 Unicode 脚本语种检测（零依赖、不消耗 API）。
@@ -84,8 +109,10 @@ class Translator:
     def reload(self, config: dict):
         """重新加载配置。调用方在保存翻译配置 / 刷新配置时触发。"""
         self.enabled = bool(config.get("enabled", False))
-        self.target = (config.get("target") or "zh").strip().lower() or "zh"
-        self.source = [str(x).strip().lower() for x in (config.get("source") or []) if str(x).strip()]
+        self.target = _norm_lang(config.get("target") or "zh") or "zh"
+        self.source = [
+            _norm_lang(x) for x in (config.get("source") or []) if str(x).strip()
+        ]
         api = config.get("api") or {}
         self.api_url = (api.get("url") or "").strip()
         self.api_method = (api.get("method") or "POST").strip().upper()
@@ -107,7 +134,7 @@ class Translator:
         self.timeout = float(api.get("timeout") or 15)
         # 语种代码映射：简码 → 接口要求的代码（如 zh → zh-CN）；同时作用于 {source}/{target}
         self.lang_map = {
-            str(k).strip().lower(): str(v).strip()
+            _norm_lang(k): str(v).strip()
             for k, v in (config.get("lang_map") or [])
             if str(k).strip() and str(v).strip()
         }
@@ -126,7 +153,7 @@ class Translator:
         """
         if not self.enabled or not self.api_url:
             return text
-        dst = (target or self.target).strip().lower() or self.target
+        dst = _norm_lang(target or self.target) or self.target
         src = detect_lang(text)
         if not self._should_translate(src, dst):
             return text
@@ -140,6 +167,14 @@ class Translator:
             logger.warning(f"[cosyvoice-translate] 翻译失败，回退原文: {e}")
             return text
         if not translated or not translated.strip():
+            return text
+        # 翻译服务回显了原文（或换了标点/括号但语种没变）时视为未翻译：
+        # 回退原文让主流程走普通语音路径，避免出现「译文\n中文：原文」重复气泡，
+        # 也避免中文译文被 _has_foreign 判假而整段跳过语音。
+        if src != dst and detect_lang(translated) == src:
+            logger.debug(
+                f"[cosyvoice-translate] 译文语种仍为 {src}，视为未翻译，回退原文"
+            )
             return text
         self._cache[text] = translated
         self._cache.move_to_end(text)
@@ -155,6 +190,7 @@ class Translator:
         - 未配置 source 白名单 → 除目标语言外全部翻
         - 配置了 source 白名单 → 仅白名单内的语种翻
         """
+        src, dst = _norm_lang(src), _norm_lang(dst)
         if src == dst:
             return False
         if not self.source:
